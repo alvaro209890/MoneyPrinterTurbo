@@ -344,6 +344,25 @@
     "Upload-Post Profile Username": "Upload-Post 게시 사용자 이름",
     "Upload-Post Profile Username Help": "[사용자 관리]({manage_users_url})에 표시된 사용자 이름을 입력하세요. Upload-Post 계정 이메일이 아닙니다. 이 게시 사용자는 선택한 플랫폼에 연결되어 있어야 합니다.",
     "Upload-Post Setup Guide": "자동 게시를 활성화하기 전에:\n1. [API 키]({api_keys_url})에서 API 키를 생성하세요.\n2. [사용자 관리]({manage_users_url})에서 게시 사용자를 생성하거나 선택한 다음 대상 플랫폼을 연결하세요.\n\n아래에 Upload-Post 계정 이메일이 아닌 해당 게시 사용자의 **사용자 이름**을 입력하세요.",
-    "YouTube Privacy Status": "YouTube 공개 상태"
+    "YouTube Privacy Status": "YouTube 공개 상태",
+    "Tab Shorts": "Shorts",
+    "Tab Long Videos": "Long Videos",
+    "Long Video Settings": "**Long video**",
+    "Target Duration Minutes": "Target duration (minutes)",
+    "Chapter Count": "Number of chapters",
+    "Chapter Count Auto": "Choose chapter count automatically",
+    "Generate Outline": "Generate structure",
+    "Outline Preview": "Chapter structure (editable)",
+    "Chapter Title": "Title",
+    "Chapter Brief": "What it covers",
+    "Chapter Weight": "Share",
+    "Narrate Chapter Titles": "Read chapter titles aloud",
+    "Normalize Loudness": "Normalize audio to -14 LUFS",
+    "Normalize Loudness Help": "Applies broadcast loudness and faststart, so the file is ready to upload without post-processing.",
+    "Generate Long Video": "Generate long video",
+    "Long Video Queue Warning": "Long video generation occupies the queue. Shorts submitted meanwhile will wait.",
+    "Long Video Clip Estimate": "Estimated: about {minutes} minutes of video, roughly {clips} clips.",
+    "Long Video Clip Count Warning": "This needs a lot of clips. Consider raising the clip duration to reduce repetition.",
+    "Long Video Sequential Notice": "Long videos always use sequential concat with materials matched to the script."
   }
 }

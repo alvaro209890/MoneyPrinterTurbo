@@ -46,6 +46,7 @@ from app.services import bgm as bgm_service
 from app.services import (
     cache_manager,
     llm,
+    long_materials,
     loomloom,
     video,
     volcengine_seedance,
@@ -6040,24 +6041,356 @@ def _render_generation_controls(
     return start_button
 
 
-def _render_application():
-    """按固定顺序渲染顶部栏、弹窗、生成表单和任务结果。"""
-    _render_top_bar()
+LONG_KEY_PREFIX = "long_"
 
-    if st.session_state.get("settings_dialog_open", False):
-        _render_settings_dialog()
 
-    if _apply_pending_settings_preset():
-        st.success(tr("Settings Preset Imported"))
+def _long_key(name: str) -> str:
+    """
+    长视频标签页的控件键前缀。
 
-    restore_applied = _apply_pending_task_restore()
-    restore_candidate_id = st.session_state.get("task_restore_candidate_id")
-    if restore_candidate_id:
-        _render_task_restore_dialog(restore_candidate_id)
-    restore_succeeded = st.session_state.pop("task_restore_succeeded", False)
-    if restore_applied or restore_succeeded:
-        st.success(tr("Task Configuration Loaded"))
+    Streamlit 的 ``key`` 在整个页面内唯一，不是按标签页隔离的。短视频标签页
+    继续使用不带前缀的键（因此用户已保存的设置照常生效），长视频标签页统一
+    加前缀，两者互不冲突。
+    """
+    return f"{LONG_KEY_PREFIX}{name}"
 
+
+def _render_long_video_outline_preview():
+    """展示"生成结构"预览产生的章节列表，允许人工调整后再渲染。"""
+    outline = st.session_state.get("long_video_outline")
+    if not outline:
+        return None
+
+    st.caption(tr("Outline Preview"))
+    edited = st.data_editor(
+        outline,
+        key=_long_key("outline_editor"),
+        use_container_width=True,
+        num_rows="dynamic",
+        column_config={
+            "title": st.column_config.TextColumn(tr("Chapter Title"), required=True),
+            "brief": st.column_config.TextColumn(tr("Chapter Brief")),
+            "weight": st.column_config.NumberColumn(
+                tr("Chapter Weight"), min_value=0.0, max_value=1.0, step=0.05
+            ),
+        },
+    )
+    return edited
+
+
+def _collect_long_video_outline():
+    """把预览任务产生的章节结构读回 session_state。"""
+    task_id = st.session_state.get("long_video_outline_task_id")
+    if not task_id:
+        return
+    task = sm.state.get_task(task_id) or {}
+    if _normalize_task_state(task.get("state")) != const.TASK_STATE_COMPLETE:
+        return
+    payload = task.get("long_video") or {}
+    chapters = payload.get("chapters") or []
+    if chapters:
+        st.session_state["long_video_outline"] = [
+            {
+                "title": chapter.get("title", ""),
+                "brief": chapter.get("brief", ""),
+                "weight": round(
+                    (chapter.get("target_seconds") or 0)
+                    / max(1.0, payload.get("target_seconds") or 1.0),
+                    3,
+                ),
+            }
+            for chapter in chapters
+        ]
+    st.session_state.pop("long_video_outline_task_id", None)
+
+
+def _render_long_video_workspace():
+    """
+    长视频工作区。
+
+    这里不复用 ``_render_audio_settings`` / ``_render_subtitle_settings``：
+    那两个函数合计约 900 行、包含十几家 TTS 供应商的分支，把它们参数化会带来
+    与收益不成比例的回归风险。长视频标签页提供一组精简控件，未覆盖的高级设置
+    继续沿用用户在短视频标签页保存的配置。
+    """
+    _collect_long_video_outline()
+
+    with st.container(key="long_settings_grid"):
+        panel = st.columns(4)
+
+    params = VideoParams(video_subject="")
+    params.video_mode = const.VIDEO_MODE_LONG
+
+    # ---- 1. 文案与结构 ----
+    with panel[0]:
+        with st.container(border=True):
+            st.write(tr("Long Video Settings"))
+            params.video_subject = st.text_input(
+                tr("Video Subject"),
+                key=_long_key("video_subject"),
+                placeholder=tr("Video Subject Placeholder"),
+            )
+            # 使用项目自带的 stable_selectbox：它把业务值保存在 session_state
+            # 里，展示文案只经过 format_func 转换。直接用 st.selectbox 搭配
+            # format_func 会让 Streamlit 的测试框架拿格式化后的选项去查找原始
+            # 值，从而在整套 WebUI 测试里报 "'' is not in list"。
+            language_labels = {"": tr("Auto Detect")}
+            params.video_language = stable_selectbox(
+                tr("Script Language"),
+                options=[""] + support_locales,
+                default_value="",
+                key=_long_key("video_language"),
+                format_func=lambda value: language_labels.get(value, value),
+            )
+            target_minutes = st.slider(
+                tr("Target Duration Minutes"),
+                min_value=int(const.LONG_VIDEO_MIN_DURATION_SECONDS / 60),
+                max_value=int(const.LONG_VIDEO_MAX_DURATION_SECONDS / 60),
+                value=10,
+                step=1,
+                key=_long_key("target_duration"),
+            )
+            params.target_duration_minutes = float(target_minutes)
+
+            auto_chapters = st.checkbox(
+                tr("Chapter Count Auto"), value=True, key=_long_key("chapters_auto")
+            )
+            if auto_chapters:
+                params.chapter_count = None
+            else:
+                params.chapter_count = st.number_input(
+                    tr("Chapter Count"),
+                    min_value=const.LONG_VIDEO_MIN_CHAPTERS,
+                    max_value=const.LONG_VIDEO_MAX_CHAPTERS,
+                    value=max(
+                        const.LONG_VIDEO_MIN_CHAPTERS,
+                        min(
+                            const.LONG_VIDEO_MAX_CHAPTERS,
+                            round(target_minutes * 60 / 150),
+                        ),
+                    ),
+                    step=1,
+                    key=_long_key("chapter_count"),
+                )
+
+            params.narrate_chapter_titles = st.checkbox(
+                tr("Narrate Chapter Titles"),
+                value=False,
+                key=_long_key("narrate_titles"),
+            )
+            params.video_script_prompt = st.text_area(
+                tr("Custom Script Requirements"),
+                key=_long_key("script_prompt"),
+                height=80,
+            )
+
+            outline_requested = st.button(
+                tr("Generate Outline"),
+                use_container_width=True,
+                key=_long_key("generate_outline"),
+            )
+            edited_outline = _render_long_video_outline_preview()
+
+    # ---- 2. 视频 ----
+    with panel[1]:
+        with st.container(border=True):
+            st.write(tr("Video Settings"))
+            params.video_aspect = stable_selectbox(
+                tr("Video Ratio"),
+                options=["16:9", "9:16", "1:1"],
+                default_value="16:9",
+                key=_long_key("video_aspect"),
+            )
+            params.video_source = stable_selectbox(
+                tr("Video Source"),
+                options=["pexels", "pixabay", "coverr", "local"],
+                default_value="pexels",
+                key=_long_key("video_source"),
+            )
+            params.video_clip_duration = st.slider(
+                tr("Clip Duration"),
+                min_value=5,
+                max_value=20,
+                value=10,
+                step=1,
+                key=_long_key("clip_duration"),
+            )
+            params.video_transition_mode = stable_selectbox(
+                tr("Video Transition Mode"),
+                options=[mode.value for mode in VideoTransitionMode],
+                default_value=VideoTransitionMode.fade_in.value,
+                key=_long_key("transition_mode"),
+            )
+            params.video_concat_mode = VideoConcatMode.sequential.value
+            params.match_materials_to_script = True
+            st.caption(tr("Long Video Sequential Notice"))
+
+    # ---- 3. 音频 ----
+    with panel[2]:
+        with st.container(border=True):
+            st.write(tr("Audio Settings"))
+            filter_locals = [params.video_language] if params.video_language else None
+            try:
+                voices = voice.get_all_azure_voices(filter_locals=filter_locals)
+            except Exception:
+                voices = []
+            if not voices:
+                try:
+                    voices = voice.get_all_azure_voices(filter_locals=None)
+                except Exception:
+                    voices = []
+            params.voice_name = (
+                stable_selectbox(
+                    tr("Speech Synthesis"),
+                    options=voices,
+                    default_value=config.ui.get("voice_name", "") or voices[0],
+                    key=_long_key("voice_name"),
+                )
+                if voices
+                else ""
+            )
+            params.voice_rate = stable_selectbox(
+                tr("Speech Rate"),
+                options=[0.8, 0.9, 1.0, 1.1, 1.2, 1.3],
+                default_value=1.0,
+                key=_long_key("voice_rate"),
+            )
+            params.voice_volume = stable_selectbox(
+                tr("Speech Volume"),
+                options=[0.6, 0.8, 1.0, 1.2, 1.5],
+                default_value=1.0,
+                key=_long_key("voice_volume"),
+            )
+            params.bgm_type = stable_selectbox(
+                tr("Background Music"),
+                options=["random", "none"],
+                default_value="random",
+                key=_long_key("bgm_type"),
+            )
+            params.bgm_volume = st.slider(
+                tr("Background Music Volume"),
+                min_value=0.0,
+                max_value=1.0,
+                value=0.15,
+                step=0.05,
+                key=_long_key("bgm_volume"),
+            )
+            params.normalize_loudness = st.checkbox(
+                tr("Normalize Loudness"),
+                value=True,
+                key=_long_key("normalize_loudness"),
+                help=tr("Normalize Loudness Help"),
+            )
+
+    # ---- 4. 字幕 ----
+    with panel[3]:
+        with st.container(border=True):
+            st.write(tr("Subtitle Settings"))
+            params.subtitle_enabled = st.checkbox(
+                tr("Enable Subtitles"), value=True, key=_long_key("subtitle_enabled")
+            )
+            font_names = get_all_fonts()
+            if font_names:
+                params.font_name = stable_selectbox(
+                    tr("Font"),
+                    options=font_names,
+                    default_value=config.ui.get("font_name", "") or font_names[0],
+                    key=_long_key("font_name"),
+                )
+            params.font_size = st.slider(
+                tr("Font Size"),
+                min_value=30,
+                max_value=100,
+                value=60,
+                key=_long_key("font_size"),
+            )
+            params.text_fore_color = st.color_picker(
+                tr("Font Color"), "#FFFFFF", key=_long_key("text_fore_color")
+            )
+            params.subtitle_position = stable_selectbox(
+                tr("Position"),
+                options=["bottom", "center", "top"],
+                default_value="bottom",
+                key=_long_key("subtitle_position"),
+            )
+            params.stroke_color = st.color_picker(
+                tr("Stroke Color"), "#000000", key=_long_key("stroke_color")
+            )
+            params.stroke_width = st.slider(
+                tr("Stroke Width"),
+                min_value=0.0,
+                max_value=5.0,
+                value=1.5,
+                step=0.5,
+                key=_long_key("stroke_width"),
+            )
+
+    # ---- 估算与提醒 ----
+    estimated_clips = long_materials.estimate_clip_count(
+        target_minutes * 60, params.video_clip_duration
+    )
+    st.caption(
+        tr("Long Video Clip Estimate").format(
+            minutes=target_minutes, clips=estimated_clips
+        )
+    )
+    if estimated_clips > 250:
+        st.warning(tr("Long Video Clip Count Warning"))
+    st.info(tr("Long Video Queue Warning"))
+
+    if edited_outline:
+        params.chapter_outline = [
+            {
+                "title": str(row.get("title") or "").strip(),
+                "brief": str(row.get("brief") or "").strip(),
+                "weight": float(row.get("weight") or 0.0),
+            }
+            for row in edited_outline
+            if str(row.get("title") or "").strip()
+        ] or None
+
+    start_button = st.button(
+        tr("Generate Long Video"),
+        use_container_width=True,
+        type="primary",
+        key=_long_key("generate_button"),
+    )
+
+    if outline_requested or start_button:
+        if not params.video_subject.strip():
+            st.error(tr("Video Script and Subject Cannot Both Be Empty"))
+            st.stop()
+
+        _save_runtime_config()
+        task_id = str(uuid4())
+        stop_at = "script" if outline_requested else "video"
+        try:
+            webui_task.submit_generation(task_id, params, stop_at=stop_at)
+        except Exception as exc:
+            logger.exception(f"failed to submit long-video task: {exc}")
+            st.error(str(exc))
+            st.stop()
+
+        if outline_requested:
+            st.session_state["long_video_outline_task_id"] = task_id
+        else:
+            _add_active_generation_task(task_id, subject=params.video_subject)
+            st.session_state["current_generation_task_id"] = task_id
+        logger.info(
+            f"WebUI long-video task submitted: task_id={task_id}, stop_at={stop_at}"
+        )
+
+    _render_current_generation_task()
+    return start_button or outline_requested
+
+
+def _render_shorts_workspace():
+    """
+    短视频工作区：原 ``_render_application`` 的表单主体，逐行保留。
+
+    抽出为独立函数是为了在其上方加入标签页，而不改变任何短视频行为。控件
+    ``key`` 也保持不带前缀，这样用户已经保存的界面设置继续生效。
+    """
     with st.container(key="main_settings_grid"):
         panel = st.columns(4)
     left_panel = panel[0]
@@ -6078,7 +6411,7 @@ def _render_application():
 
     _render_subtitle_settings(right_panel, params)
 
-    generation_submitted = _render_generation_controls(
+    return _render_generation_controls(
         params,
         uploaded_files,
         uploaded_audio_file,
@@ -6086,9 +6419,35 @@ def _render_application():
         voice_mode,
     )
 
+
+def _render_application():
+    """按固定顺序渲染顶部栏、弹窗、生成表单和任务结果。"""
+    _render_top_bar()
+
+    if st.session_state.get("settings_dialog_open", False):
+        _render_settings_dialog()
+
+    if _apply_pending_settings_preset():
+        st.success(tr("Settings Preset Imported"))
+
+    restore_applied = _apply_pending_task_restore()
+    restore_candidate_id = st.session_state.get("task_restore_candidate_id")
+    if restore_candidate_id:
+        _render_task_restore_dialog(restore_candidate_id)
+    restore_succeeded = st.session_state.pop("task_restore_succeeded", False)
+    if restore_applied or restore_succeeded:
+        st.success(tr("Task Configuration Loaded"))
+
+    shorts_tab, long_tab = st.tabs([tr("Tab Shorts"), tr("Tab Long Videos")])
+
+    with shorts_tab:
+        generation_submitted = _render_shorts_workspace()
+    with long_tab:
+        long_submitted = _render_long_video_workspace()
+
     # 生成分支在启动后台线程前已经请求过保存。普通控件交互继续请求非阻塞保存；
     # 如果后台任务正在使用配置，配置层会在任务结束时自动应用并落盘最新值。
-    if not generation_submitted:
+    if not generation_submitted and not long_submitted:
         _save_runtime_config()
 
 

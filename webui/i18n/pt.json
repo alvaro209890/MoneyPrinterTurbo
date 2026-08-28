@@ -344,6 +344,25 @@
     "Upload-Post Profile Username": "Nome de Usuário do Perfil Upload-Post",
     "Upload-Post Profile Username Help": "Informe o nome de usuário exibido em [Manage Users]({manage_users_url}), não o e-mail da sua conta Upload-Post. Esse usuário de publicação deve estar conectado às plataformas selecionadas.",
     "Upload-Post Setup Guide": "Antes de ativar a publicação automática:\n1. Crie uma chave API em [API Keys]({api_keys_url}).\n2. Crie ou selecione um usuário de publicação em [Manage Users]({manage_users_url}) e conecte as plataformas de destino.\n\nInforme abaixo o **nome de usuário** de publicação, não o e-mail da sua conta Upload-Post.",
-    "YouTube Privacy Status": "Status de Privacidade do YouTube"
+    "YouTube Privacy Status": "Status de Privacidade do YouTube",
+    "Tab Shorts": "Shorts",
+    "Tab Long Videos": "Vídeos Longos",
+    "Long Video Settings": "**Vídeo longo**",
+    "Target Duration Minutes": "Duração-alvo (minutos)",
+    "Chapter Count": "Número de capítulos",
+    "Chapter Count Auto": "Definir capítulos automaticamente",
+    "Generate Outline": "Gerar estrutura",
+    "Outline Preview": "Estrutura de capítulos (editável)",
+    "Chapter Title": "Título",
+    "Chapter Brief": "O que cobre",
+    "Chapter Weight": "Peso",
+    "Narrate Chapter Titles": "Narrar os títulos dos capítulos",
+    "Normalize Loudness": "Normalizar áudio em -14 LUFS",
+    "Normalize Loudness Help": "Aplica o loudness de broadcast e o faststart, deixando o arquivo pronto para subir sem pós-processamento.",
+    "Generate Long Video": "Gerar vídeo longo",
+    "Long Video Queue Warning": "A geração de vídeo longo ocupa a fila. Shorts enviados durante ela ficam aguardando.",
+    "Long Video Clip Estimate": "Estimativa: cerca de {minutes} minutos de vídeo, aproximadamente {clips} clipes.",
+    "Long Video Clip Count Warning": "São muitos clipes. Considere aumentar a duração do corte para reduzir a repetição.",
+    "Long Video Sequential Notice": "Vídeos longos sempre usam concatenação sequencial com materiais casados ao roteiro."
   }
 }

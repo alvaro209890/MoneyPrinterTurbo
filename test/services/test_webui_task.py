@@ -448,30 +448,36 @@ def test_generation_submit_skips_duplicate_config_save():
         for node in tree.body
         if isinstance(node, ast.FunctionDef) and node.name == "_render_application"
     )
+    # 表单主体在引入标签页时被抽到 _render_shorts_workspace，提交信号由它
+    # 透传给 _render_application。这里跟着结构走，但断言的性质不变：提交后
+    # 页面末尾不能再次请求配置保存。
+    shorts_workspace = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "_render_shorts_workspace"
+    )
 
     assert isinstance(controls.body[-1], ast.Return)
     assert ast.unparse(controls.body[-1].value) == "start_button"
 
-    submitted_assignment = next(
-        node
-        for node in application.body
-        if isinstance(node, ast.Assign)
-        and any(
-            isinstance(target, ast.Name) and target.id == "generation_submitted"
-            for target in node.targets
-        )
-    )
-    assert isinstance(submitted_assignment.value, ast.Call)
-    assert _attribute_name(submitted_assignment.value.func) == (
+    # 短视频工作区必须把 _render_generation_controls 的返回值原样返回。
+    assert isinstance(shorts_workspace.body[-1], ast.Return)
+    assert isinstance(shorts_workspace.body[-1].value, ast.Call)
+    assert _attribute_name(shorts_workspace.body[-1].value.func) == (
         "_render_generation_controls"
     )
 
+    # 末尾的保存必须同时受两个标签页的提交状态保护：任何一个提交了任务，
+    # 后台线程就可能已经持有 runtime_config_lock。
     guarded_save = next(
         node
         for node in application.body
         if isinstance(node, ast.If)
-        and ast.unparse(node.test) == "not generation_submitted"
+        and "generation_submitted" in ast.unparse(node.test)
     )
+    assert "not generation_submitted" in ast.unparse(guarded_save.test)
+    assert "not long_submitted" in ast.unparse(guarded_save.test)
     guarded_calls = {
         _attribute_name(node.func)
         for node in ast.walk(guarded_save)

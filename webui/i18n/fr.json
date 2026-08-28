@@ -344,6 +344,25 @@
     "Upload-Post Profile Username": "Nom d'utilisateur du profil Upload-Post",
     "Upload-Post Profile Username Help": "Saisissez le nom d'utilisateur affiché dans [Manage Users]({manage_users_url}), et non l'adresse e-mail de votre compte Upload-Post. Cet utilisateur de publication doit être connecté aux plateformes sélectionnées.",
     "Upload-Post Setup Guide": "Avant d'activer la publication automatique :\n1. Créez une clé API dans [API Keys]({api_keys_url}).\n2. Créez ou sélectionnez un utilisateur de publication dans [Manage Users]({manage_users_url}), puis connectez les plateformes cibles.\n\nSaisissez ci-dessous son **nom d'utilisateur**, et non l'adresse e-mail de votre compte Upload-Post.",
-    "YouTube Privacy Status": "Statut de confidentialité YouTube"
+    "YouTube Privacy Status": "Statut de confidentialité YouTube",
+    "Tab Shorts": "Shorts",
+    "Tab Long Videos": "Long Videos",
+    "Long Video Settings": "**Long video**",
+    "Target Duration Minutes": "Target duration (minutes)",
+    "Chapter Count": "Number of chapters",
+    "Chapter Count Auto": "Choose chapter count automatically",
+    "Generate Outline": "Generate structure",
+    "Outline Preview": "Chapter structure (editable)",
+    "Chapter Title": "Title",
+    "Chapter Brief": "What it covers",
+    "Chapter Weight": "Share",
+    "Narrate Chapter Titles": "Read chapter titles aloud",
+    "Normalize Loudness": "Normalize audio to -14 LUFS",
+    "Normalize Loudness Help": "Applies broadcast loudness and faststart, so the file is ready to upload without post-processing.",
+    "Generate Long Video": "Generate long video",
+    "Long Video Queue Warning": "Long video generation occupies the queue. Shorts submitted meanwhile will wait.",
+    "Long Video Clip Estimate": "Estimated: about {minutes} minutes of video, roughly {clips} clips.",
+    "Long Video Clip Count Warning": "This needs a lot of clips. Consider raising the clip duration to reduce repetition.",
+    "Long Video Sequential Notice": "Long videos always use sequential concat with materials matched to the script."
   }
 }

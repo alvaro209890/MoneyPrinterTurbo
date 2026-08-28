@@ -344,6 +344,25 @@
     "Upload-Post Profile Username": "Имя пользователя профиля Upload-Post",
     "Upload-Post Profile Username Help": "Введите имя пользователя со страницы [Manage Users]({manage_users_url}), а не адрес электронной почты аккаунта Upload-Post. Этот пользователь публикации должен быть подключён к выбранным платформам.",
     "Upload-Post Setup Guide": "Перед включением автопубликации:\n1. Создайте API-ключ на странице [API Keys]({api_keys_url}).\n2. Создайте или выберите пользователя публикации на странице [Manage Users]({manage_users_url}) и подключите целевые платформы.\n\nНиже введите его **имя пользователя**, а не адрес электронной почты аккаунта Upload-Post.",
-    "YouTube Privacy Status": "Статус конфиденциальности YouTube"
+    "YouTube Privacy Status": "Статус конфиденциальности YouTube",
+    "Tab Shorts": "Shorts",
+    "Tab Long Videos": "Long Videos",
+    "Long Video Settings": "**Long video**",
+    "Target Duration Minutes": "Target duration (minutes)",
+    "Chapter Count": "Number of chapters",
+    "Chapter Count Auto": "Choose chapter count automatically",
+    "Generate Outline": "Generate structure",
+    "Outline Preview": "Chapter structure (editable)",
+    "Chapter Title": "Title",
+    "Chapter Brief": "What it covers",
+    "Chapter Weight": "Share",
+    "Narrate Chapter Titles": "Read chapter titles aloud",
+    "Normalize Loudness": "Normalize audio to -14 LUFS",
+    "Normalize Loudness Help": "Applies broadcast loudness and faststart, so the file is ready to upload without post-processing.",
+    "Generate Long Video": "Generate long video",
+    "Long Video Queue Warning": "Long video generation occupies the queue. Shorts submitted meanwhile will wait.",
+    "Long Video Clip Estimate": "Estimated: about {minutes} minutes of video, roughly {clips} clips.",
+    "Long Video Clip Count Warning": "This needs a lot of clips. Consider raising the clip duration to reduce repetition.",
+    "Long Video Sequential Notice": "Long videos always use sequential concat with materials matched to the script."
   }
 }

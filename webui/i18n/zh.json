@@ -413,6 +413,25 @@
     "Upload-Post Profile Username": "Upload-Post 发布用户名称",
     "Upload-Post Profile Username Help": "填写 [Manage Users]({manage_users_url}) 页面显示的 Username，而不是 Upload-Post 登录邮箱；该发布用户需要已经连接所选平台。",
     "Upload-Post Setup Guide": "启用自动发布前，请先：\n1. 在 [API Keys]({api_keys_url}) 页面创建 API Key。\n2. 在 [Manage Users]({manage_users_url}) 页面创建或选择发布用户，并连接目标平台。\n\n下方请填写该发布用户的 **Username**，而不是 Upload-Post 登录邮箱。",
-    "YouTube Privacy Status": "YouTube 隐私状态"
+    "YouTube Privacy Status": "YouTube 隐私状态",
+    "Tab Shorts": "短视频",
+    "Tab Long Videos": "长视频",
+    "Long Video Settings": "**长视频**",
+    "Target Duration Minutes": "目标时长（分钟）",
+    "Chapter Count": "章节数量",
+    "Chapter Count Auto": "自动决定章节数量",
+    "Generate Outline": "生成结构",
+    "Outline Preview": "章节结构（可编辑）",
+    "Chapter Title": "标题",
+    "Chapter Brief": "本章内容",
+    "Chapter Weight": "占比",
+    "Narrate Chapter Titles": "朗读章节标题",
+    "Normalize Loudness": "将音频归一化到 -14 LUFS",
+    "Normalize Loudness Help": "应用广播响度标准与 faststart，无需后处理即可直接上传。",
+    "Generate Long Video": "生成长视频",
+    "Long Video Queue Warning": "长视频生成会占用队列，期间提交的短视频需要排队等待。",
+    "Long Video Clip Estimate": "预计：约 {minutes} 分钟视频，约 {clips} 个片段。",
+    "Long Video Clip Count Warning": "所需片段较多，可以适当增加单个片段时长以减少重复。",
+    "Long Video Sequential Notice": "长视频始终使用顺序拼接，并让素材跟随文案顺序。"
   }
 }
