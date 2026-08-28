@@ -568,6 +568,132 @@ def tail_sentences(text: str, count: int = 2) -> str:
     return " ".join(sentences[-count:])[-600:]
 
 
+def _script_units(script: str) -> List[str]:
+    """Split a supplied script at semantic boundaries without losing its text."""
+    content = re.sub(r"\r\n?", "\n", (script or "").strip())
+    if not content:
+        return []
+
+    paragraphs = [
+        re.sub(r"[ \t]+", " ", item).strip()
+        for item in re.split(r"\n\s*\n", content)
+        if item.strip()
+    ]
+    # A pasted script is often one giant paragraph. Sentence-sized units keep
+    # chapter boundaries meaningful while preserving punctuation and order.
+    if len(paragraphs) == 1:
+        sentences = [
+            item.strip()
+            for item in _SENTENCE_SPLIT_RE.split(paragraphs[0])
+            if item.strip()
+        ]
+        if len(sentences) > 1:
+            return sentences
+    return paragraphs
+
+
+def _partition_script_units(units: List[str], weights: List[float]) -> List[str]:
+    """Partition ordered script units into contiguous weighted chapters."""
+    if not units or not weights:
+        return []
+
+    chapter_count = min(len(weights), len(units))
+    weights = normalize_chapter_weights(weights[:chapter_count])
+    sizes = [max(1, len(unit)) for unit in units]
+    total_size = sum(sizes)
+    chapters: List[str] = []
+    unit_index = 0
+    consumed = 0
+    cumulative_weight = 0.0
+
+    for chapter_position in range(chapter_count):
+        remaining_chapters = chapter_count - chapter_position
+        if remaining_chapters == 1:
+            end = len(units)
+        else:
+            cumulative_weight += weights[chapter_position]
+            target = total_size * cumulative_weight
+            end = unit_index
+            running = consumed
+            max_end = len(units) - (remaining_chapters - 1)
+            while end < max_end:
+                candidate = running + sizes[end]
+                # Always give the chapter one unit, then choose the nearest
+                # semantic boundary to the requested cumulative weight.
+                if end > unit_index and abs(running - target) <= abs(candidate - target):
+                    break
+                running = candidate
+                end += 1
+            end = max(unit_index + 1, end)
+
+        selected = units[unit_index:end]
+        chapters.append("\n\n".join(selected).strip())
+        consumed += sum(sizes[unit_index:end])
+        unit_index = end
+
+    return chapters
+
+
+def plan_from_supplied_script(params: VideoParams) -> LongVideoPlan:
+    """Build chapter metadata for ``video_script`` without making any LLM call."""
+    units = _script_units(params.video_script)
+    if not units:
+        raise ValueError("provided long-video script is empty")
+
+    target_seconds = resolve_target_seconds(params)
+    outline = list(params.chapter_outline or [])
+    desired_count = (
+        len(outline)
+        or params.chapter_count
+        or suggest_chapter_count(target_seconds)
+    )
+    count = max(1, min(int(desired_count), len(units)))
+
+    if outline:
+        outline = outline[:count]
+        raw_weights = [item.weight for item in outline]
+        titles = [item.title for item in outline]
+        briefs = [item.brief for item in outline]
+    else:
+        raw_weights = [1.0] * count
+        titles = [f"Chapter {index}" for index in range(1, count + 1)]
+        briefs = [""] * count
+
+    weights = normalize_chapter_weights(raw_weights)
+    scripts = _partition_script_units(units, weights)
+    chapters: List[Chapter] = []
+    cursor = 0
+    for position, script in enumerate(scripts):
+        title = str(titles[position]).strip() or f"Chapter {position + 1}"
+        if params.narrate_chapter_titles:
+            spoken_title = title if title.endswith((".", "!", "?", "。", "！", "？")) else f"{title}."
+            script = f"{spoken_title}\n\n{script}"
+        start = cursor
+        end = start + len(script)
+        cursor = end + 2
+        chapters.append(
+            Chapter(
+                index=position + 1,
+                title=title,
+                brief=str(briefs[position]).strip(),
+                target_seconds=weights[position] * target_seconds,
+                script=script,
+                char_start=start,
+                char_end=end,
+            )
+        )
+
+    logger.info(
+        f"using supplied long-video script: {len(chapters)} chapters, no LLM calls"
+    )
+    return LongVideoPlan(
+        subject=params.video_subject,
+        language=params.video_language or "",
+        target_seconds=target_seconds,
+        chapters=chapters,
+    )
+
+
 def build_chapter_requirements(
     plan: LongVideoPlan,
     chapter: Chapter,
@@ -697,6 +823,12 @@ def build_long_script(
     ``progress_cb`` 接收 0..1 的完成度，供任务编排层映射到全局进度条。长视频
     的文案生成可能持续数分钟，没有进度上报的话界面会长时间静默。
     """
+    if (params.video_script or "").strip():
+        plan = plan_from_supplied_script(params)
+        if progress_cb:
+            progress_cb(1.0)
+        return truncate_plan_to_budget(plan)[0]
+
     target_seconds = resolve_target_seconds(params)
     plan = plan_chapters(
         subject=params.video_subject,
@@ -718,6 +850,15 @@ def build_long_script(
         script = generate_chapter_script(
             plan, chapter, previous_tail=previous_tail, app_config=app_config
         )
+        if params.narrate_chapter_titles:
+            title = chapter.title.strip()
+            if title:
+                spoken_title = (
+                    title
+                    if title.endswith((".", "!", "?", "。", "！", "？"))
+                    else f"{title}."
+                )
+                script = f"{spoken_title}\n\n{script}"
         estimated = estimate_narration_seconds(script)
         drift = estimated - chapter.target_seconds
         logger.info(

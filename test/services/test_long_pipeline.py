@@ -234,6 +234,26 @@ class TestLongModeRouting(unittest.TestCase):
         self.assertEqual(captured["aspect"], "16:9")
         self.assertEqual(captured["clip"], 10)
 
+    def test_custom_audio_still_supplies_chapter_timings_to_materials(self):
+        plan = self._plan()
+        params = self._long_params(custom_audio_file="narration.wav")
+        with _PipelineHarness(
+            **{
+                "app.services.long_video.build_long_script": plan,
+                "app.services.long_video.generate_chapter_terms": plan,
+                "app.services.task.generate_audio": ("narration.wav", 600.0, None),
+                "app.services.long_audio.build_long_subtitle": "",
+                "app.services.long_materials.collect_materials": (["clip.mp4"], []),
+            }
+        ) as mocks:
+            result = tm._run_pipeline("t", params, stop_at="materials")
+
+        call = mocks["app.services.long_materials.collect_materials"].call_args
+        timings = call.kwargs["chapter_audios"]
+        self.assertEqual(len(timings), 1)
+        self.assertEqual(timings[0].duration, 600.0)
+        self.assertEqual(result["materials"], ["clip.mp4"])
+
 
 class TestLongModePreflight(unittest.TestCase):
     def test_duration_above_cap_fails_before_spending_quota(self):

@@ -178,6 +178,8 @@ class TestFfmpegCommands(unittest.TestCase):
         )
         self.assertIn("copy", command)
         self.assertIn("+faststart", command)
+        self.assertIn("aac", command)
+        self.assertIn("48000", command)
 
     def test_loudnorm_failure_returns_original_file(self):
         with unittest.mock.patch("subprocess.run") as run:
@@ -245,6 +247,7 @@ class TestSynthesizeLongNarration(unittest.TestCase):
         self.params = unittest.mock.Mock(
             voice_name="pt-BR-ThalitaMultilingualNeural-Female",
             voice_rate=1.0,
+            voice_volume=0.8,
             subtitle_enabled=False,
         )
 
@@ -380,6 +383,77 @@ class TestSynthesizeLongNarration(unittest.TestCase):
             )
         self.assertEqual(len(kept), 1)
         self.assertEqual(warnings[0]["code"], const.WARNING_LONG_VIDEO_TRUNCATED)
+
+    def test_voice_volume_is_forwarded_to_each_chapter(self):
+        with unittest.mock.patch(
+            "app.utils.utils.task_dir", return_value=self.directory
+        ), unittest.mock.patch(
+            "app.services.voice.parse_voice_name", side_effect=lambda value: value
+        ), unittest.mock.patch(
+            "app.services.voice.get_audio_duration", return_value=100.0
+        ), unittest.mock.patch(
+            "app.services.voice.tts", return_value=unittest.mock.Mock()
+        ) as tts, unittest.mock.patch(
+            "app.services.long_audio.concat_audio_files", return_value="audio.mp3"
+        ):
+            long_audio.synthesize_long_narration("t", self.params, self.plan)
+
+        for call in tts.call_args_list:
+            self.assertEqual(call.kwargs["voice_volume"], 0.8)
+
+
+class TestExternalAudioChapterTimings(unittest.TestCase):
+    def test_distributes_external_audio_and_preserves_total_duration(self):
+        plan = long_video.LongVideoPlan(
+            subject="x",
+            language="pt-BR",
+            target_seconds=100,
+            chapters=[
+                long_video.Chapter(1, "A", "", 25, script="a"),
+                long_video.Chapter(2, "B", "", 75, script="b"),
+            ],
+        )
+        timings = long_audio.chapter_timings_for_audio(plan, "voice.wav", 200.0)
+        self.assertEqual([item.duration for item in timings], [50.0, 150.0])
+        self.assertEqual([item.offset for item in timings], [0.0, 50.0])
+        self.assertAlmostEqual(sum(item.duration for item in timings), 200.0)
+
+
+class TestLongWhisperSubtitle(unittest.TestCase):
+    def test_transcribes_once_and_corrects_each_chapter_slice(self):
+        import tempfile
+
+        directory = tempfile.mkdtemp()
+        chapters = [
+            long_audio.ChapterAudio(1, "audio.mp3", 10.0, 0.0, script="first"),
+            long_audio.ChapterAudio(2, "audio.mp3", 10.0, 10.0, script="second"),
+        ]
+
+        def create_once(audio_file, subtitle_file):
+            _write(
+                directory,
+                os.path.basename(subtitle_file),
+                "1\n00:00:01,000 --> 00:00:02,000\nfirst\n\n"
+                "2\n00:00:11,000 --> 00:00:12,000\nsecond\n\n",
+            )
+
+        with unittest.mock.patch(
+            "app.utils.utils.task_dir", return_value=directory
+        ), unittest.mock.patch(
+            "app.services.subtitle.create", side_effect=create_once
+        ) as create, unittest.mock.patch(
+            "app.services.subtitle.correct"
+        ) as correct:
+            output = long_audio.build_long_whisper_subtitle(
+                "task", "audio.mp3", chapters
+            )
+
+        create.assert_called_once()
+        self.assertEqual(correct.call_count, 2)
+        with open(output, "r", encoding="utf-8") as handle:
+            content = handle.read()
+        self.assertIn("00:00:01,000 --> 00:00:02,000", content)
+        self.assertIn("00:00:11,000 --> 00:00:12,000", content)
 
 
 if __name__ == "__main__":

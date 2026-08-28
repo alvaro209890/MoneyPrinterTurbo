@@ -329,6 +329,19 @@ def generate_long_script(task_id, params):
     return plan, None
 
 
+def _long_video_state_payload(plan, chapter_audios=(), **extra):
+    """Serialize chapter metadata plus measured audio offsets for task/API state."""
+    payload = long_video.plan_to_dict(plan)
+    audio_by_index = {item.index: item for item in chapter_audios}
+    for chapter in payload.get("chapters", []):
+        timing = audio_by_index.get(chapter.get("index"))
+        if timing is not None:
+            chapter["audio_offset_seconds"] = round(timing.offset, 3)
+            chapter["audio_duration_seconds"] = round(timing.duration, 3)
+    payload.update(extra)
+    return payload
+
+
 def generate_script(task_id, params):
     logger.info("\n\n## generating video script")
     video_script = params.video_script.strip()
@@ -1447,6 +1460,9 @@ def _run_pipeline(
         if failure is not None:
             return failure
         video_script = long_plan.full_script
+        sm.state.update_task(
+            task_id, long_video=_long_video_state_payload(long_plan)
+        )
     else:
         video_script = generate_script(task_id, params)
         if not video_script or "Error: " in video_script:
@@ -1540,8 +1556,26 @@ def _run_pipeline(
                 f"custom audio is {audio_duration:.0f}s, above the "
                 f"{const.LONG_VIDEO_MAX_DURATION_SECONDS}s long-video cap",
             )
+        if is_long:
+            chapter_audios = long_audio.chapter_timings_for_audio(
+                long_plan, audio_file, audio_duration
+            )
 
     sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=35)
+    if is_long:
+        sm.state.update_task(
+            task_id,
+            long_video=_long_video_state_payload(
+                long_plan,
+                chapter_audios,
+                duration_seconds=audio_duration,
+                chapter_count=long_plan.chapter_count,
+                truncated=any(
+                    warning.get("code") == const.WARNING_LONG_VIDEO_TRUNCATED
+                    for warning in long_warnings
+                ),
+            ),
+        )
 
     if stop_at == "audio":
         sm.state.update_task(
@@ -1556,11 +1590,15 @@ def _run_pipeline(
     if is_long and chapter_audios:
         # 各章字幕按累计的实际音频时长平移后合并。偏移必须来自测得的时长，
         # 否则误差会随章节累积，在视频后半段明显错位。
-        subtitle_path = (
-            long_audio.build_long_subtitle(task_id, chapter_audios)
-            if params.subtitle_enabled
-            else ""
-        )
+        subtitle_provider = config.app.get("subtitle_provider", "edge").strip().lower()
+        if not params.subtitle_enabled:
+            subtitle_path = ""
+        elif subtitle_provider == "whisper":
+            subtitle_path = long_audio.build_long_whisper_subtitle(
+                task_id, audio_file, chapter_audios
+            )
+        else:
+            subtitle_path = long_audio.build_long_subtitle(task_id, chapter_audios)
         if params.subtitle_enabled and not subtitle_path:
             logger.warning("long-video subtitles unavailable; continuing without them")
     else:
@@ -1702,8 +1740,9 @@ def _run_pipeline(
     if is_long and long_plan is not None:
         # 章节结构和技术验收结果要进入任务状态：上传流程据此判断是否发布，
         # 变更日志据此描述视频结构，都不需要再打开 MP4。
+        long_video_payload = _long_video_state_payload(long_plan, chapter_audios)
         kwargs["long_video"] = {
-            **long_video.plan_to_dict(long_plan),
+            **long_video_payload,
             "duration_seconds": audio_duration,
             "chapter_count": long_plan.chapter_count,
             "truncated": any(

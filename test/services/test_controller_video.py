@@ -17,6 +17,7 @@ from app.controllers.v1 import video as video_controller
 from app.models import const
 from app.models.exception import HttpException
 from app.models.schema import TaskDeletionResponse, TaskListResponse, TaskQueryResponse
+from app.models.schema import TaskVideoRequest
 from app.services import material_upload
 from app.services import state as sm
 from app.utils import utils
@@ -142,6 +143,48 @@ class TestVideoControllerTasks(unittest.TestCase):
             task_id="task-123",
             params=body,
             stop_at="audio",
+        )
+
+    def test_long_outline_endpoint_forces_long_mode_and_script_stage(self):
+        body = TaskVideoRequest(video_subject="The history of GPS")
+        with patch.object(video_controller, "create_task") as create_task:
+            video_controller.create_long_video_outline(
+                MagicMock(), self._request(), body
+            )
+
+        queued_body = create_task.call_args.args[1]
+        self.assertEqual(queued_body.video_mode, const.VIDEO_MODE_LONG)
+        self.assertEqual(queued_body.target_duration_minutes, 10)
+        self.assertEqual(create_task.call_args.kwargs["stop_at"], "script")
+
+    def test_chapters_endpoint_returns_structure_and_audio_offsets(self):
+        task = {
+            "task_id": "long-1",
+            "state": const.TASK_STATE_COMPLETE,
+            "progress": 100,
+            "warnings": [{"code": "example"}],
+            "long_video": {
+                "duration_seconds": 620.5,
+                "chapter_count": 1,
+                "truncated": False,
+                "chapters": [
+                    {
+                        "index": 1,
+                        "title": "Opening",
+                        "audio_offset_seconds": 0.0,
+                        "audio_duration_seconds": 620.5,
+                    }
+                ],
+            },
+        }
+        with patch.object(video_controller.sm.state, "get_task", return_value=task):
+            response = video_controller.get_task_chapters(
+                self._request(), task_id="long-1"
+            )
+
+        self.assertEqual(response["data"]["chapter_count"], 1)
+        self.assertEqual(
+            response["data"]["chapters"][0]["audio_duration_seconds"], 620.5
         )
 
     def test_create_task_removes_state_when_queue_is_full(self):

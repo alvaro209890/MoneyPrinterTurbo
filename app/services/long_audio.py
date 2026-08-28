@@ -255,6 +255,12 @@ def build_loudnorm_command(
         f"loudnorm=I={target_lufs}:TP={true_peak}:LRA={loudness_range}",
         "-c:v",
         "copy",
+        "-c:a",
+        "aac",
+        "-ar",
+        "48000",
+        "-b:a",
+        "192k",
         "-movflags",
         "+faststart",
         output_file,
@@ -311,6 +317,33 @@ def chapters_within_budget(
     return kept, dropped
 
 
+def chapter_timings_for_audio(plan, audio_file: str, audio_duration: float) -> List[ChapterAudio]:
+    """Allocate external narration time across chapters using their target weights."""
+    if audio_duration <= 0 or not plan.chapters:
+        return []
+    weights = [max(0.0, float(item.target_seconds or 0.0)) for item in plan.chapters]
+    total_weight = sum(weights) or float(len(weights))
+    offset = 0.0
+    timings: List[ChapterAudio] = []
+    for position, chapter in enumerate(plan.chapters):
+        duration = (
+            audio_duration - offset
+            if position == len(plan.chapters) - 1
+            else audio_duration * ((weights[position] or 1.0) / total_weight)
+        )
+        timings.append(
+            ChapterAudio(
+                index=chapter.index,
+                audio_file=audio_file,
+                duration=max(0.0, duration),
+                offset=offset,
+                script=chapter.script,
+            )
+        )
+        offset += max(0.0, duration)
+    return timings
+
+
 def synthesize_long_narration(
     task_id: str,
     params,
@@ -360,6 +393,7 @@ def synthesize_long_narration(
                         voice_name=voice_name,
                         voice_rate=params.voice_rate,
                         voice_file=audio_file,
+                        voice_volume=params.voice_volume,
                     )
                     if sub_maker is None:
                         raise RuntimeError("tts returned no subtitle maker")
@@ -390,9 +424,9 @@ def synthesize_long_narration(
 
         # 每章单独产出字幕，稍后按偏移合并。逐章生成让 Edge 的时间轴与该章
         # 文案严格对应，避免整篇匹配时的错行。
-        subtitle_file = ""
+        candidate = os.path.join(task_dir, f"chapter-{chapter.index:03d}.srt")
+        subtitle_file = candidate if os.path.isfile(candidate) else ""
         if params.subtitle_enabled and sub_maker is not None:
-            candidate = os.path.join(task_dir, f"chapter-{chapter.index:03d}.srt")
             try:
                 voice.create_subtitle(
                     text=chapter.script, sub_maker=sub_maker, subtitle_file=candidate
@@ -466,3 +500,71 @@ def build_long_subtitle(
         return ""
     output_file = os.path.join(utils.task_dir(task_id), "subtitle.srt")
     return merge_srt_with_offsets(parts, output_file)
+
+
+def _write_srt_blocks(
+    blocks: Sequence[tuple[float, float, str]], output_file: str
+) -> str:
+    if not blocks:
+        return ""
+    lines: List[str] = []
+    for index, (start, end, body) in enumerate(blocks, start=1):
+        lines.extend(
+            [
+                str(index),
+                f"{format_srt_timestamp(start)} {_SRT_ARROW} {format_srt_timestamp(end)}",
+                body,
+                "",
+            ]
+        )
+    with open(output_file, "w", encoding="utf-8") as handle:
+        handle.write("\n".join(lines))
+    return output_file
+
+
+def build_long_whisper_subtitle(
+    task_id: str,
+    audio_file: str,
+    chapter_audios: Sequence[ChapterAudio],
+) -> str:
+    """Transcribe once, then correct chapter-sized SRT slices to avoid O(n*m) growth."""
+    from app.services import subtitle
+
+    task_dir = utils.task_dir(task_id)
+    raw_file = os.path.join(task_dir, "subtitle-whisper-raw.srt")
+    subtitle.create(audio_file=audio_file, subtitle_file=raw_file)
+    raw_blocks = _read_srt_blocks(raw_file)
+    if not raw_blocks:
+        logger.warning("whisper produced no subtitle blocks")
+        return ""
+
+    corrected_parts: List[tuple[str, float]] = []
+    for chapter in chapter_audios:
+        chapter_start = chapter.offset
+        chapter_end = chapter.offset + chapter.duration
+        local_blocks: List[tuple[float, float, str]] = []
+        for start, end, body in raw_blocks:
+            midpoint = (start + end) / 2.0
+            if chapter_start <= midpoint < chapter_end or (
+                chapter is chapter_audios[-1] and midpoint >= chapter_start
+            ):
+                local_blocks.append(
+                    (
+                        max(0.0, start - chapter_start),
+                        max(0.0, end - chapter_start),
+                        body,
+                    )
+                )
+        if not local_blocks:
+            logger.warning(f"whisper produced no cues for chapter {chapter.index}")
+            continue
+        part = os.path.join(task_dir, f"chapter-{chapter.index:03d}-whisper.srt")
+        _write_srt_blocks(local_blocks, part)
+        subtitle.correct(part, chapter.script)
+        corrected_parts.append((part, chapter.offset))
+
+    if not corrected_parts:
+        return ""
+    return merge_srt_with_offsets(
+        corrected_parts, os.path.join(task_dir, "subtitle.srt")
+    )

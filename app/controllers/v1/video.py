@@ -15,6 +15,7 @@ from app.controllers.manager.base_manager import TaskQueueFullError
 from app.controllers.manager.memory_manager import InMemoryTaskManager
 from app.controllers.manager.redis_manager import RedisTaskManager
 from app.controllers.v1.base import new_router
+from app.models import const
 from app.models.exception import HttpException
 from app.models.schema import (
     AudioRequest,
@@ -22,6 +23,7 @@ from app.models.schema import (
     BgmUploadResponse,
     SubtitleRequest,
     TaskDeletionResponse,
+    TaskChaptersResponse,
     TaskListResponse,
     TaskQueryRequest,
     TaskQueryResponse,
@@ -31,6 +33,7 @@ from app.models.schema import (
     VideoMaterialRetrieveResponse
 )
 from app.services import bgm as bgm_service
+from app.services import long_video as long_video_service
 from app.services import material_upload as material_upload_service
 from app.services import state as sm
 from app.services import task as tm
@@ -185,6 +188,28 @@ def create_video(
     return create_task(request, body, stop_at="video")
 
 
+@router.post(
+    "/long-videos/outline",
+    response_model=TaskResponse,
+    summary="Generate a long-video outline and chapter script",
+)
+def create_long_video_outline(
+    background_tasks: BackgroundTasks, request: Request, body: TaskVideoRequest
+):
+    """Queue the shared pipeline in long mode and stop after the script stage."""
+    payload = body.model_dump()
+    payload.update(
+        video_mode=const.VIDEO_MODE_LONG,
+        target_duration_minutes=(
+            body.target_duration_minutes
+            or long_video_service.DEFAULT_TARGET_DURATION_MINUTES
+        ),
+        video_count=1,
+    )
+    long_body = TaskVideoRequest.model_validate(payload)
+    return create_task(request, long_body, stop_at="script")
+
+
 @router.post("/subtitle", response_model=TaskResponse, summary="Generate subtitle only")
 def create_subtitle(
     background_tasks: BackgroundTasks, request: Request, body: SubtitleRequest
@@ -285,6 +310,46 @@ def get_task(
     raise HttpException(
         task_id=task_id, status_code=404, message=f"{request_id}: task not found"
     )
+
+
+@router.get(
+    "/tasks/{task_id}/chapters",
+    response_model=TaskChaptersResponse,
+    summary="Get long-video chapter structure and timing",
+)
+def get_task_chapters(
+    request: Request,
+    task_id: str = Path(..., description="Task ID"),
+):
+    request_id = base.get_task_id(request)
+    task = sm.state.get_task(task_id)
+    if not task:
+        raise HttpException(
+            task_id=task_id,
+            status_code=404,
+            message=f"{request_id}: task not found",
+        )
+
+    long_data = task.get("long_video")
+    if not isinstance(long_data, dict):
+        raise HttpException(
+            task_id=task_id,
+            status_code=404,
+            message=f"{request_id}: task has no long-video chapter data",
+        )
+
+    chapters = list(long_data.get("chapters") or [])
+    response = {
+        "task_id": task_id,
+        "state": task.get("state", const.TASK_STATE_PROCESSING),
+        "progress": task.get("progress", 0),
+        "duration_seconds": long_data.get("duration_seconds"),
+        "chapter_count": long_data.get("chapter_count", len(chapters)),
+        "truncated": bool(long_data.get("truncated", False)),
+        "chapters": chapters,
+        "warnings": list(task.get("warnings") or []),
+    }
+    return utils.get_response(200, response)
 
 
 @router.delete(

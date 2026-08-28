@@ -331,6 +331,19 @@ class TaskListData(BaseModel):
     page_size: int
 
 
+class TaskChaptersData(BaseModel):
+    """Chapter progress exposed without requiring clients to inspect the MP4."""
+
+    task_id: str
+    state: int
+    progress: int = 0
+    duration_seconds: Optional[float] = None
+    chapter_count: int = 0
+    truncated: bool = False
+    chapters: List[dict[str, Any]] = Field(default_factory=list)
+    warnings: List[dict[str, Any]] = Field(default_factory=list)
+
+
 class VideoScriptData(BaseModel):
     video_script: str
 
@@ -423,6 +436,10 @@ class TaskQueryResponse(BaseResponse):
             ],
         }
     )
+
+
+class TaskChaptersResponse(BaseResponse):
+    data: TaskChaptersData
 
 
 class TaskListResponse(BaseResponse):

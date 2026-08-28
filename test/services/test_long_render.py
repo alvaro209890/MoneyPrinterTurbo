@@ -145,6 +145,7 @@ class TestVerifyLongVideo(unittest.TestCase):
             {
                 "codec_type": "video",
                 "codec_name": "h264",
+                "profile": "High",
                 "pix_fmt": "yuv420p",
                 "width": 1920,
                 "height": 1080,
@@ -164,6 +165,8 @@ class TestVerifyLongVideo(unittest.TestCase):
             "app.services.long_render._probe", return_value=probe or self.GOOD_PROBE
         ), unittest.mock.patch(
             "app.services.long_render.decode_check", return_value=True
+        ), unittest.mock.patch(
+            "app.services.long_render.measure_loudness", return_value=(-14.0, -1.5)
         ):
             return long_render.verify_long_video(self.path, **kwargs)
 
@@ -241,6 +244,39 @@ class TestVerifyLongVideo(unittest.TestCase):
         payload = self._verify().to_dict()
         for key in ("duration_seconds", "faststart", "passed", "problems"):
             self.assertIn(key, payload)
+
+    def test_wrong_profile_audio_codec_and_sample_rate_fail(self):
+        probe = {
+            "format": {"duration": "600"},
+            "streams": [
+                {
+                    "codec_type": "video",
+                    "codec_name": "h264",
+                    "profile": "Main",
+                    "pix_fmt": "yuv420p",
+                    "width": 1920,
+                    "height": 1080,
+                },
+                {"codec_type": "audio", "codec_name": "mp3", "sample_rate": "44100"},
+            ],
+        }
+        report = self._verify(probe=probe)
+        self.assertFalse(report.passed)
+        self.assertTrue(any("profile" in item for item in report.problems))
+        self.assertTrue(any("sample rate" in item for item in report.problems))
+
+    def test_loudness_outside_channel_spec_fails(self):
+        with unittest.mock.patch(
+            "app.services.long_render._probe", return_value=self.GOOD_PROBE
+        ), unittest.mock.patch(
+            "app.services.long_render.decode_check", return_value=True
+        ), unittest.mock.patch(
+            "app.services.long_render.measure_loudness", return_value=(-18.0, -0.5)
+        ):
+            report = long_render.verify_long_video(self.path)
+        self.assertFalse(report.passed)
+        self.assertTrue(any("loudness" in item for item in report.problems))
+        self.assertTrue(any("true peak" in item for item in report.problems))
 
 
 class TestRenderLongVideo(unittest.TestCase):

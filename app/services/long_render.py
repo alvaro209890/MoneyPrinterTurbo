@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -55,9 +56,12 @@ class VerificationReport:
     width: int = 0
     height: int = 0
     video_codec: str = ""
+    video_profile: str = ""
     pix_fmt: str = ""
     audio_codec: str = ""
     sample_rate: int = 0
+    loudness_lufs: Optional[float] = None
+    true_peak_dbfs: Optional[float] = None
     faststart: bool = False
     decode_ok: bool = False
     within_cap: bool = False
@@ -76,9 +80,12 @@ class VerificationReport:
             "duration_seconds": round(self.duration, 3),
             "resolution": f"{self.width}x{self.height}",
             "video_codec": self.video_codec,
+            "video_profile": self.video_profile,
             "pix_fmt": self.pix_fmt,
             "audio_codec": self.audio_codec,
             "sample_rate": self.sample_rate,
+            "loudness_lufs": self.loudness_lufs,
+            "true_peak_dbfs": self.true_peak_dbfs,
             "faststart": self.faststart,
             "decode_ok": self.decode_ok,
             "within_cap": self.within_cap,
@@ -264,6 +271,7 @@ def verify_long_video(
     path: str,
     expected_duration: Optional[float] = None,
     check_decode: bool = True,
+    check_loudness: bool = True,
 ) -> VerificationReport:
     """
     对成片做技术验收，返回结构化报告。
@@ -286,6 +294,7 @@ def verify_long_video(
     for stream in info.get("streams", []):
         if stream.get("codec_type") == "video" and not report.video_codec:
             report.video_codec = str(stream.get("codec_name") or "")
+            report.video_profile = str(stream.get("profile") or "")
             report.pix_fmt = str(stream.get("pix_fmt") or "")
             report.width = int(stream.get("width") or 0)
             report.height = int(stream.get("height") or 0)
@@ -313,10 +322,36 @@ def verify_long_video(
 
     if report.video_codec and report.video_codec not in ("h264", "libx264"):
         report.problems.append(f"unexpected video codec: {report.video_codec}")
+    if report.video_codec in ("h264", "libx264") and report.video_profile:
+        if report.video_profile.lower() != "high":
+            report.problems.append(
+                f"unexpected H.264 profile: {report.video_profile} (expected High)"
+            )
     if report.pix_fmt and report.pix_fmt != NORMALIZED_PIX_FMT:
         report.problems.append(f"unexpected pixel format: {report.pix_fmt}")
     if not report.audio_codec:
         report.problems.append("output has no audio stream")
+    elif report.audio_codec != "aac":
+        report.problems.append(f"unexpected audio codec: {report.audio_codec}")
+    if report.sample_rate and report.sample_rate != 48000:
+        report.problems.append(
+            f"unexpected audio sample rate: {report.sample_rate} (expected 48000)"
+        )
+
+    if check_loudness and report.audio_codec:
+        measured = measure_loudness(path)
+        if measured is None:
+            report.problems.append("could not measure integrated loudness")
+        else:
+            report.loudness_lufs, report.true_peak_dbfs = measured
+            if not -15.0 <= report.loudness_lufs <= -13.0:
+                report.problems.append(
+                    f"integrated loudness {report.loudness_lufs:.1f} LUFS is outside -14 +/- 1 LU"
+                )
+            if report.true_peak_dbfs > -1.5:
+                report.problems.append(
+                    f"true peak {report.true_peak_dbfs:.1f} dBFS exceeds -1.5 dBFS"
+                )
 
     report.faststart = _has_faststart(path)
     if not report.faststart:
@@ -330,6 +365,46 @@ def verify_long_video(
         report.decode_ok = True
 
     return report
+
+
+def build_loudness_measure_command(
+    path: str, ffmpeg_binary: Optional[str] = None
+) -> List[str]:
+    return [
+        ffmpeg_binary or utils.get_ffmpeg_binary(),
+        "-hide_banner",
+        "-nostats",
+        "-i",
+        path,
+        "-af",
+        "loudnorm=I=-14:TP=-1.5:LRA=11:print_format=json",
+        "-f",
+        "null",
+        "-",
+    ]
+
+
+def measure_loudness(path: str) -> Optional[tuple[float, float]]:
+    """Measure integrated loudness and true peak from FFmpeg's loudnorm analysis."""
+    result = subprocess.run(
+        build_loudness_measure_command(path),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        logger.warning(f"loudness measurement failed: {(result.stderr or '').strip()}")
+        return None
+    matches = re.findall(r"\{\s*\"input_i\".*?\}", result.stderr or "", re.DOTALL)
+    if not matches:
+        logger.warning("loudness measurement returned no JSON summary")
+        return None
+    try:
+        payload = json.loads(matches[-1])
+        return float(payload["input_i"]), float(payload["input_tp"])
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        logger.warning(f"invalid loudness measurement summary: {exc}")
+        return None
 
 
 def build_decode_check_command(

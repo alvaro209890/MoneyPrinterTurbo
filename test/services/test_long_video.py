@@ -41,6 +41,55 @@ class TestShortModeUnchanged(unittest.TestCase):
         self.assertIs(long_video.apply_long_video_defaults(params), params)
 
 
+class TestSuppliedLongScript(unittest.TestCase):
+    def _params(self, **updates):
+        values = {
+            "video_subject": "A history supplied by the editor",
+            "video_mode": "long",
+            "target_duration_minutes": 5,
+            "video_script": (
+                "First fact closes here. Second fact follows it. "
+                "Third fact changes the direction. Fourth fact explains the result. "
+                "Fifth fact closes the story. Sixth fact is the conclusion."
+            ),
+            "chapter_count": 3,
+        }
+        values.update(updates)
+        return VideoParams(**values)
+
+    def test_supplied_script_skips_every_llm_call(self):
+        params = self._params()
+        with unittest.mock.patch(
+            "app.services.llm._generate_response",
+            side_effect=AssertionError("outline LLM must not run"),
+        ), unittest.mock.patch(
+            "app.services.llm.generate_script",
+            side_effect=AssertionError("script LLM must not run"),
+        ):
+            plan = long_video.build_long_script(params)
+
+        self.assertEqual(plan.chapter_count, 3)
+        self.assertIn("First fact", plan.full_script)
+        self.assertIn("Sixth fact", plan.full_script)
+        for chapter in plan.chapters:
+            self.assertEqual(
+                plan.full_script[chapter.char_start : chapter.char_end],
+                chapter.script,
+            )
+
+    def test_narrated_titles_are_part_of_script_and_offsets(self):
+        plan = long_video.build_long_script(
+            self._params(narrate_chapter_titles=True)
+        )
+        self.assertTrue(plan.chapters[0].script.startswith("Chapter 1.\n\n"))
+        self.assertEqual(
+            plan.full_script[
+                plan.chapters[1].char_start : plan.chapters[1].char_end
+            ],
+            plan.chapters[1].script,
+        )
+
+
 class TestLongModeValidation(unittest.TestCase):
     def test_long_mode_requires_duration_or_outline(self):
         with self.assertRaises(ValidationError):

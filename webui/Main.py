@@ -6104,6 +6104,50 @@ def _collect_long_video_outline():
     st.session_state.pop("long_video_outline_task_id", None)
 
 
+_LONG_VIDEO_CONTROLLED_FIELDS = (
+    "video_mode",
+    "video_subject",
+    "video_script",
+    "video_language",
+    "target_duration_minutes",
+    "chapter_count",
+    "chapter_outline",
+    "narrate_chapter_titles",
+    "video_script_prompt",
+    "video_aspect",
+    "video_source",
+    "video_clip_duration",
+    "video_transition_mode",
+    "video_concat_mode",
+    "match_materials_to_script",
+    "voice_name",
+    "voice_rate",
+    "voice_volume",
+    "bgm_type",
+    "bgm_volume",
+    "normalize_loudness",
+    "subtitle_enabled",
+    "font_name",
+    "font_size",
+    "text_fore_color",
+    "subtitle_position",
+    "stroke_color",
+    "stroke_width",
+)
+
+
+def _finalize_long_video_params(params: VideoParams) -> VideoParams:
+    """Mark only visible long-tab controls as explicit Pydantic input fields."""
+    # The form builds one mutable VideoParams instance. Plain assignment does
+    # not update model_fields_set, which apply_long_video_defaults relies on to
+    # distinguish a deliberate 9:16 choice from an omitted aspect. model_copy
+    # records update keys while leaving hidden defaults such as n_threads
+    # implicit, so the service can still choose its long-mode CPU default.
+    return params.model_copy(
+        update={name: getattr(params, name) for name in _LONG_VIDEO_CONTROLLED_FIELDS}
+    )
+
+
 def _render_long_video_workspace():
     """
     长视频工作区。
@@ -6129,6 +6173,11 @@ def _render_long_video_workspace():
                 tr("Video Subject"),
                 key=_long_key("video_subject"),
                 placeholder=tr("Video Subject Placeholder"),
+            )
+            params.video_script = st.text_area(
+                tr("Video Script"),
+                key=_long_key("video_script"),
+                height=150,
             )
             # 使用项目自带的 stable_selectbox：它把业务值保存在 session_state
             # 里，展示文案只经过 format_func 转换。直接用 st.selectbox 搭配
@@ -6357,10 +6406,11 @@ def _render_long_video_workspace():
     )
 
     if outline_requested or start_button:
-        if not params.video_subject.strip():
+        if not params.video_subject.strip() and not params.video_script.strip():
             st.error(tr("Video Script and Subject Cannot Both Be Empty"))
             st.stop()
 
+        params = _finalize_long_video_params(params)
         _save_runtime_config()
         task_id = str(uuid4())
         stop_at = "script" if outline_requested else "video"
