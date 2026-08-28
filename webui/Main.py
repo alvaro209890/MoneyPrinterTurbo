@@ -1081,7 +1081,7 @@ def _render_task_table(filtered_tasks, key_prefix):
                         _open_task_video(task["video_file"])
 
                 with action_cols[1]:
-                    download_label = tr("Download")
+                    download_label = tr("Download Video")
                     st.download_button(
                         download_label,
                         # callable: le o MP4 so no clique, fora do rerun de 2s
