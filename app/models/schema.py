@@ -3,9 +3,10 @@ from enum import Enum
 from typing import Any, List, Literal, Optional, Union
 
 import pydantic
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.config import config
+from app.models import const
 
 # 忽略 Pydantic 的特定警告
 warnings.filterwarnings(
@@ -61,6 +62,19 @@ class MaterialInfo:
     # 本地上传素材不需要填写；写入任务文件前仍会按字段白名单重新构造，
     # 避免外部请求传入的签名 URL、凭据或无关字段进入持久化数据。
     source_info: Optional[dict[str, Any]] = None
+
+
+class ChapterOutlineItem(BaseModel):
+    """
+    长视频大纲中的单个章节。
+
+    ``weight`` 是该章节占总时长的比例。允许为 0：解析大纲时若模型没有给出
+    可用的权重，会统一改为均分，而不是让整个任务失败。
+    """
+
+    title: str = Field(max_length=200)
+    brief: str = Field(default="", max_length=1000)
+    weight: float = Field(default=0.0, ge=0.0, le=1.0)
 
 
 class VideoParams(BaseModel):
@@ -127,6 +141,44 @@ class VideoParams(BaseModel):
     paragraph_number: int = Field(default=1, ge=1, le=10)
     video_script_prompt: str = Field(default="", max_length=2000)
     custom_system_prompt: str = Field(default="", max_length=8000)
+
+    # ---- 长视频模式 / Long-form mode -------------------------------------
+    # 这些字段全部可选且带默认值：不传时行为与原来完全一致，历史任务记录也能
+    # 继续反序列化。长视频的差异化默认值由 long_video.apply_long_video_defaults
+    # 负责，不在这里改动既有默认值。
+    #
+    # All optional with defaults: omitting them keeps the previous behaviour
+    # byte-for-byte and lets stored tasks deserialize. Long-mode defaults live in
+    # long_video.apply_long_video_defaults, not in these field defaults.
+    video_mode: Literal["short", "long"] = const.VIDEO_MODE_SHORT
+    target_duration_minutes: Optional[float] = Field(
+        default=None,
+        ge=const.LONG_VIDEO_MIN_DURATION_SECONDS / 60,
+        le=const.LONG_VIDEO_MAX_DURATION_SECONDS / 60,
+    )
+    chapter_count: Optional[int] = Field(
+        default=None,
+        ge=const.LONG_VIDEO_MIN_CHAPTERS,
+        le=const.LONG_VIDEO_MAX_CHAPTERS,
+    )
+    chapter_outline: Optional[List[ChapterOutlineItem]] = None
+    narrate_chapter_titles: bool = False
+    normalize_loudness: bool = True
+
+    @model_validator(mode="after")
+    def _validate_long_mode(self):
+        if self.video_mode != const.VIDEO_MODE_LONG:
+            return self
+
+        if self.target_duration_minutes is None and not self.chapter_outline:
+            raise ValueError(
+                "long mode requires target_duration_minutes or chapter_outline"
+            )
+        # 长视频渲染成本很高，一次任务只产出一条成片；生成多个候选应改为
+        # 分别提交任务，避免一次失败浪费数十分钟的渲染。
+        if self.video_count != 1:
+            raise ValueError("long mode supports a single output video")
+        return self
 
 
 class SubtitleRequest(BaseModel):
