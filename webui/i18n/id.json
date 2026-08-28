@@ -96,6 +96,8 @@
     "Number of Videos Generated Simultaneously": "Video per Proses",
     "Match Materials to Script Order": "Cocokkan Visual dengan Urutan Skrip",
     "Match Materials to Script Order Help": "Buat kata kunci dan urutkan materi mengikuti skrip agar visual sesuai dengan narasi.",
+    "Semantic Scene Matching": "Penyelarasan Adegan Semantik Cerdas (AI)",
+    "Semantic Scene Matching Help": "AI menganalisis narasi detik demi detik dan mencari klip yang menampilkan tepat apa yang sedang dinarasikan saat itu.",
     "Audio Settings": "**Pengaturan Audio**",
     "Voiceover Mode": "Mode Sulih Suara",
     "Automatic Voiceover": "Otomatis",

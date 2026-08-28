@@ -96,6 +96,8 @@
     "Number of Videos Generated Simultaneously": "Vidéos par exécution",
     "Match Materials to Script Order": "Faire correspondre les visuels à l'ordre du script",
     "Match Materials to Script Order Help": "Génère les mots-clés et associe les visuels dans l'ordre chronologique du script pour synchroniser la voix off.",
+    "Semantic Scene Matching": "Alignement sémantique intelligent des scènes (IA)",
+    "Semantic Scene Matching Help": "L'IA analyse la voix off seconde par seconde et cherche des clips qui montrent exactement ce qui est narré à ce moment.",
     "Audio Settings": "**Paramètres audio**",
     "Voiceover Mode": "Mode de voix off",
     "Automatic Voiceover": "Auto",

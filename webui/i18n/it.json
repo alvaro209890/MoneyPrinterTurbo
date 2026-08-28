@@ -96,6 +96,8 @@
     "Number of Videos Generated Simultaneously": "Video per esecuzione",
     "Match Materials to Script Order": "Adatta il materiale visivo all'ordine del testo",
     "Match Materials to Script Order Help": "Genera parole chiave e abbina il materiale nell'ordine del testo in modo che le immagini seguano la voce fuori campo.",
+    "Semantic Scene Matching": "Allineamento semantico intelligente delle scene (IA)",
+    "Semantic Scene Matching Help": "L'IA analizza la narrazione secondo per secondo e cerca clip che mostrano esattamente ciò che viene raccontato in quel momento.",
     "Audio Settings": "**Impostazioni audio**",
     "Voiceover Mode": "Modalità voce fuori campo",
     "Automatic Voiceover": "Automatica",

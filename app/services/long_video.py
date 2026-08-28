@@ -950,6 +950,27 @@ def generate_chapter_terms(
     return plan
 
 
+def analyze_chapters_for_semantic_matching(
+    task_id: str,
+    plan: LongVideoPlan,
+    chapter_audios,
+    params: VideoParams,
+):
+    """Decompõe cada capítulo em cenas visuais e unifica a timeline."""
+    from app.services import semantic_analyzer
+
+    min_sec = float(getattr(params, "semantic_min_scene_duration", 3.5) or 3.5)
+    max_sec = float(getattr(params, "semantic_max_scene_duration", 7.0) or 7.0)
+    return semantic_analyzer.analyze_long_narration_scenes(
+        task_id=task_id,
+        plan=plan,
+        chapter_audios=chapter_audios or [],
+        subject=params.video_subject,
+        min_sec=min_sec,
+        max_sec=max_sec,
+    )
+
+
 def plan_to_dict(plan: LongVideoPlan, estimated_seconds: Optional[float] = None) -> dict:
     """
     序列化计划，写入任务的 script.json。

@@ -762,6 +762,83 @@ def combine_videos(
     return combined_video_path
 
 
+def render_semantic_timeline(
+    task_id: str,
+    timeline,
+    audio_file: str,
+    params: VideoParams,
+    output_file: str | None = None,
+) -> str:
+    """
+    Corta cada slot da timeline com FFmpeg e concatena no comprimento do áudio.
+
+    O resultado é uma faixa de vídeo muda; o áudio/legendas entram em
+    ``generate_video``, como no fluxo legado de ``combine_videos``.
+    """
+    from app.services import long_render
+
+    slots = list(getattr(timeline, "slots", None) or [])
+    if not slots:
+        raise RuntimeError("semantic timeline has no slots to render")
+
+    output_file = output_file or os.path.join(
+        utils.task_dir(task_id), "combined-1.mp4"
+    )
+    output_dir = os.path.dirname(os.path.abspath(output_file)) or utils.task_dir(task_id)
+    work_dir = os.path.join(output_dir, "semantic_slots")
+    os.makedirs(work_dir, exist_ok=True)
+
+    aspect = VideoAspect(params.video_aspect)
+    width, height = aspect.to_resolution()
+    audio_duration = 0.0
+    if audio_file and os.path.isfile(audio_file):
+        audio_clip = AudioFileClip(audio_file)
+        try:
+            audio_duration = float(audio_clip.duration or 0.0)
+        finally:
+            close_clip(audio_clip)
+
+    clip_files: list[str] = []
+    for index, slot in enumerate(slots, start=1):
+        source = getattr(slot, "source_video_path", "")
+        if not source or not os.path.isfile(source):
+            logger.warning(f"skipping missing slot source: {source}")
+            continue
+        target = os.path.join(work_dir, f"slot-{index:04d}.mp4")
+        duration = float(getattr(slot, "target_duration", 0.0) or 0.0)
+        if duration <= 0:
+            duration = float(getattr(slot, "end_time", 0.0) - getattr(slot, "start_time", 0.0))
+        offset = float(getattr(slot, "source_start_offset", 0.0) or 0.0)
+        speed = float(getattr(slot, "speed", 1.0) or 1.0)
+        try:
+            long_render.normalize_clip(
+                source,
+                target,
+                width,
+                height,
+                start=offset if offset > 0 else None,
+                duration=duration,
+                clip_speed=speed,
+            )
+            clip_files.append(target)
+        except Exception as exc:
+            logger.warning(f"failed to render semantic slot {index}: {exc}")
+
+    if not clip_files:
+        raise RuntimeError("every semantic slot failed to render")
+
+    max_duration = audio_duration if audio_duration > 0 else None
+    concat_video_clips_with_ffmpeg(
+        clip_files=clip_files,
+        output_file=output_file,
+        threads=getattr(params, "n_threads", 2) or 2,
+        output_dir=work_dir,
+        max_duration=max_duration,
+    )
+    logger.info(f"semantic timeline rendered: {output_file}")
+    return output_file
+
+
 def wrap_text(text, max_width, font="Arial", fontsize=60):
     # 字幕换行必须在真正创建 TextClip 前完成，否则 MoviePy 只会按原始文本
     # 计算渲染区域。这里用 PIL 按当前字体和字号测量宽度，确保每一行都尽量

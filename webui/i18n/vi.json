@@ -96,6 +96,8 @@
     "Number of Videos Generated Simultaneously": "Số video mỗi lần",
     "Match Materials to Script Order": "Khớp hình ảnh theo thứ tự kịch bản",
     "Match Materials to Script Order Help": "Tạo từ khóa và sắp xếp tư liệu theo kịch bản để hình ảnh theo sát lời đọc.",
+    "Semantic Scene Matching": "Căn chỉnh cảnh ngữ nghĩa thông minh (AI)",
+    "Semantic Scene Matching Help": "AI phân tích lời thuyết minh từng giây và tìm clip thể hiện đúng điều đang được kể tại thời điểm đó.",
     "Audio Settings": "**Cài Đặt Âm Thanh**",
     "Voiceover Mode": "Phương Thức Lồng Tiếng",
     "Automatic Voiceover": "Tự Động",

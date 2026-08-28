@@ -106,6 +106,8 @@
     "Number of Videos Generated Simultaneously": "Videos per Run",
     "Match Materials to Script Order": "Match Visuals to Script Order",
     "Match Materials to Script Order Help": "Generate keywords and match materials in script order so visuals follow the current voiceover.",
+    "Semantic Scene Matching": "Smart Semantic Scene Alignment (AI)",
+    "Semantic Scene Matching Help": "The AI analyzes the voiceover second by second and searches for clips that show exactly what is being narrated at that moment.",
     "Audio Settings": "**Audio Settings**",
     "Voiceover Mode": "Voiceover Mode",
     "Automatic Voiceover": "Auto",

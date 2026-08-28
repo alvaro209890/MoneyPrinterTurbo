@@ -96,6 +96,8 @@
     "Number of Videos Generated Simultaneously": "한 번에 생성할 영상 수",
     "Match Materials to Script Order": "스크립트 순서에 맞춰 영상 배치",
     "Match Materials to Script Order Help": "키워드를 스크립트 순서대로 생성하고 소재를 매칭해, 화면이 현재 내레이션을 따라가도록 합니다.",
+    "Semantic Scene Matching": "지능형 의미 장면 정렬 (AI)",
+    "Semantic Scene Matching Help": "AI가 나레이션을 초 단위로 분석하고 그 순간에 말하는 내용과 정확히 맞는 클립을 찾습니다.",
     "Audio Settings": "**오디오 설정**",
     "Voiceover Mode": "내레이션 방식",
     "Automatic Voiceover": "자동",

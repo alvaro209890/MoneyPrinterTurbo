@@ -96,6 +96,8 @@
     "Number of Videos Generated Simultaneously": "Vídeos por execução",
     "Match Materials to Script Order": "Ajustar imagens à ordem do roteiro",
     "Match Materials to Script Order Help": "Gera termos e organiza os materiais conforme o roteiro para acompanhar a narração.",
+    "Semantic Scene Matching": "Alinhamento Semântico Inteligente de Cenas (IA)",
+    "Semantic Scene Matching Help": "A IA analisa a fala segundo a segundo e busca clipes que mostram exatamente o que está sendo narrado naquele momento.",
     "Audio Settings": "**Configurações de Áudio**",
     "Voiceover Mode": "Modo de narração",
     "Automatic Voiceover": "Automática",

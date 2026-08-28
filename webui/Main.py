@@ -481,6 +481,9 @@ def _initialize_session_state():
         "match_materials_to_script": bool(
             config.app.get("match_materials_to_script", False)
         ),
+        "enable_semantic_matching": bool(
+            config.app.get("enable_semantic_matching", True)
+        ),
         "custom_bgm_file_input": _saved_ui_text("custom_bgm_file"),
         "sonilo_bgm_prompt_input": _saved_ui_text(
             "sonilo_bgm_prompt",
@@ -1349,6 +1352,9 @@ def _apply_restored_params(params):
     _set_stable_widget_value("video_count_select", params.get("video_count", 1))
     st.session_state["match_materials_to_script"] = bool(
         params.get("match_materials_to_script", False)
+    )
+    st.session_state["enable_semantic_matching"] = bool(
+        params.get("enable_semantic_matching", True)
     )
 
     # 音频设置。TTS server 未写入旧任务，根据历史 voice_name 推断。
@@ -3929,6 +3935,16 @@ def _render_video_settings(panel, params):
                 "match_materials_to_script",
                 params.match_materials_to_script,
             )
+            params.enable_semantic_matching = st.checkbox(
+                tr("Semantic Scene Matching"),
+                help=tr("Semantic Scene Matching Help"),
+                key="enable_semantic_matching",
+            )
+            _set_runtime_config(
+                "app",
+                "enable_semantic_matching",
+                params.enable_semantic_matching,
+            )
             # 顺序匹配开启时，sequential 是派生出的强制值，不应覆盖用户在关闭
             # 该功能时选择的拼接偏好；关闭后仍能恢复此前的 random/sequential。
             if not params.match_materials_to_script:
@@ -6166,6 +6182,7 @@ _LONG_VIDEO_CONTROLLED_FIELDS = (
     "video_transition_mode",
     "video_concat_mode",
     "match_materials_to_script",
+    "enable_semantic_matching",
     "voice_name",
     "voice_rate",
     "voice_volume",
@@ -6318,6 +6335,13 @@ def _render_long_video_workspace():
             )
             params.video_concat_mode = VideoConcatMode.sequential.value
             params.match_materials_to_script = True
+            long_semantic_key = _long_key("enable_semantic_matching")
+            st.session_state.setdefault(long_semantic_key, True)
+            params.enable_semantic_matching = st.checkbox(
+                tr("Semantic Scene Matching"),
+                help=tr("Semantic Scene Matching Help"),
+                key=long_semantic_key,
+            )
             st.caption(tr("Long Video Sequential Notice"))
 
     # ---- 3. 音频 ----
@@ -6497,6 +6521,9 @@ def _render_shorts_workspace():
     params = VideoParams(video_subject="")
     params.match_materials_to_script = bool(
         st.session_state.get("match_materials_to_script", False)
+    )
+    params.enable_semantic_matching = bool(
+        st.session_state.get("enable_semantic_matching", True)
     )
     _render_script_settings(left_panel, params)
 

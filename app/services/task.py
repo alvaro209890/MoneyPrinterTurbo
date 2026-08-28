@@ -24,9 +24,11 @@ from app.services import (
     long_video,
     loomloom,
     material,
+    semantic_analyzer,
     sonilo,
     subtitle,
     task_artifacts,
+    timeline_engine,
     twelvelabs,
     video,
     volcengine_seedance,
@@ -679,6 +681,97 @@ def generate_subtitle(task_id, params, video_script, sub_maker, audio_file):
     return subtitle_path
 
 
+_SEMANTIC_STOCK_SOURCES = frozenset({"pexels", "pixabay", "coverr", "local"})
+
+
+def _semantic_matching_enabled(params: VideoParams) -> bool:
+    return bool(getattr(params, "enable_semantic_matching", False))
+
+
+def _unique_manifest_paths(manifest: list[dict]) -> list[str]:
+    paths = []
+    seen = set()
+    for item in manifest or []:
+        path = item.get("file_path") if isinstance(item, dict) else None
+        if path and path not in seen:
+            seen.add(path)
+            paths.append(path)
+    return paths
+
+
+def _try_semantic_matching(
+    task_id,
+    params: VideoParams,
+    video_script: str,
+    subtitle_path: str,
+    audio_duration: float,
+    *,
+    is_long: bool = False,
+    long_plan=None,
+    chapter_audios=None,
+    local_paths: list[str] | None = None,
+):
+    """
+    Tenta o pipeline semântico. Qualquer falha devolve (None, None) para o
+    fluxo legado continuar intacto.
+    """
+    source = str(params.video_source or "").strip().lower()
+    if not _semantic_matching_enabled(params) or source not in _SEMANTIC_STOCK_SOURCES:
+        return None, None
+
+    min_sec = float(getattr(params, "semantic_min_scene_duration", 3.5) or 3.5)
+    max_sec = float(getattr(params, "semantic_max_scene_duration", 7.0) or 7.0)
+
+    try:
+        if is_long and long_plan is not None:
+            semantic_plan = long_video.analyze_chapters_for_semantic_matching(
+                task_id=task_id,
+                plan=long_plan,
+                chapter_audios=chapter_audios or [],
+                params=params,
+            )
+        else:
+            subtitles = semantic_analyzer.load_subtitles_from_srt(subtitle_path)
+            if not subtitles:
+                return None, None
+            semantic_plan = semantic_analyzer.analyze_narration_scenes(
+                task_id=task_id,
+                script=video_script,
+                subtitles=subtitles,
+                subject=params.video_subject,
+                min_sec=min_sec,
+                max_sec=max_sec,
+                total_duration=audio_duration,
+            )
+        if not semantic_plan or not semantic_plan.scenes:
+            return None, None
+
+        sm.state.update_task(task_id, progress=45)
+        manifest = material.download_materials_for_scenes(
+            task_id=task_id,
+            semantic_plan=semantic_plan,
+            video_source=source,
+            video_aspect=params.video_aspect,
+            local_paths=local_paths,
+        )
+        if not manifest:
+            return None, None
+
+        sm.state.update_task(task_id, progress=55)
+        timeline = timeline_engine.build_semantic_timeline(
+            semantic_plan=semantic_plan,
+            materials_manifest=manifest,
+        )
+        if not timeline.slots:
+            return None, None
+        return _unique_manifest_paths(manifest), timeline
+    except Exception as exc:
+        logger.warning(
+            f"semantic matching unavailable, falling back to legacy pipeline: {exc}"
+        )
+        return None, None
+
+
 def get_video_materials(
     task_id,
     params,
@@ -850,7 +943,8 @@ def _record_loomloom_run_reference(
 
 
 def generate_long_final_video(
-    task_id, params, downloaded_videos, audio_file, subtitle_path, audio_duration
+    task_id, params, downloaded_videos, audio_file, subtitle_path, audio_duration,
+    semantic_timeline=None,
 ):
     """
     长视频的成片流程，返回与 generate_final_videos 相同的三元组。
@@ -864,14 +958,23 @@ def generate_long_final_video(
     final_video_path = path.join(utils.task_dir(task_id), "final-1.mp4")
 
     logger.info(f"\n\n## combining long video => {combined_video_path}")
-    long_render.render_long_video(
-        task_id=task_id,
-        params=params,
-        material_paths=downloaded_videos,
-        audio_duration=audio_duration,
-        output_file=combined_video_path,
-        progress_cb=_make_progress_cb(task_id, 55, 85),
-    )
+    if semantic_timeline is not None:
+        video.render_semantic_timeline(
+            task_id=task_id,
+            timeline=semantic_timeline,
+            audio_file=audio_file,
+            params=params,
+            output_file=combined_video_path,
+        )
+    else:
+        long_render.render_long_video(
+            task_id=task_id,
+            params=params,
+            material_paths=downloaded_videos,
+            audio_duration=audio_duration,
+            output_file=combined_video_path,
+            progress_cb=_make_progress_cb(task_id, 55, 85),
+        )
 
     logger.info(f"\n\n## generating long video => {final_video_path}")
     video.generate_video(
@@ -919,7 +1022,8 @@ def generate_long_final_video(
 
 
 def generate_final_videos(
-    task_id, params, downloaded_videos, audio_file, subtitle_path, audio_duration
+    task_id, params, downloaded_videos, audio_file, subtitle_path, audio_duration,
+    semantic_timeline=None,
 ):
     final_video_paths = []
     combined_video_paths = []
@@ -946,17 +1050,26 @@ def generate_final_videos(
             utils.task_dir(task_id), f"combined-{index}.mp4"
         )
         logger.info(f"\n\n## combining video: {index} => {combined_video_path}")
-        video.combine_videos(
-            combined_video_path=combined_video_path,
-            video_paths=downloaded_videos,
-            audio_file=audio_file,
-            video_aspect=params.video_aspect,
-            video_concat_mode=video_concat_mode,
-            video_transition_mode=video_transition_mode,
-            max_clip_duration=params.video_clip_duration,
-            threads=params.n_threads,
-            clip_speed=params.video_clip_speed,
-        )
+        if semantic_timeline is not None:
+            video.render_semantic_timeline(
+                task_id=task_id,
+                timeline=semantic_timeline,
+                audio_file=audio_file,
+                params=params,
+                output_file=combined_video_path,
+            )
+        else:
+            video.combine_videos(
+                combined_video_path=combined_video_path,
+                video_paths=downloaded_videos,
+                audio_file=audio_file,
+                video_aspect=params.video_aspect,
+                video_concat_mode=video_concat_mode,
+                video_transition_mode=video_transition_mode,
+                max_clip_duration=params.video_clip_duration,
+                threads=params.n_threads,
+                clip_speed=params.video_clip_speed,
+            )
 
         _progress += 50 / params.video_count / 2
         sm.state.update_task(task_id, progress=_progress)
@@ -1618,29 +1731,69 @@ def _run_pipeline(
     sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=38)
 
     # 5. Get video materials
+    semantic_timeline = None
+    downloaded_videos = None
     if is_long and params.video_source not in ("local", "loomloom"):
-        try:
-            downloaded_videos, material_warnings = long_materials.collect_materials(
-                task_id=task_id,
-                params=params,
-                plan=long_plan,
-                chapter_audios=chapter_audios,
-                progress_cb=_make_progress_cb(task_id, 38, 55),
-                paid_source_confirmed=bool(
-                    getattr(params, "paid_source_confirmed", False)
-                ),
-            )
-        except Exception as exc:
-            return _mark_task_failed(task_id, "materials", str(exc))
-        long_warnings.extend(material_warnings)
-    else:
-        downloaded_videos = get_video_materials(
+        sm.state.update_task(task_id, progress=40)
+        downloaded_videos, semantic_timeline = _try_semantic_matching(
             task_id,
             params,
-            video_terms,
+            video_script,
+            subtitle_path,
             audio_duration,
-            loomloom_video_request=loomloom_video_request,
+            is_long=True,
+            long_plan=long_plan,
+            chapter_audios=chapter_audios,
         )
+        if not downloaded_videos:
+            try:
+                downloaded_videos, material_warnings = long_materials.collect_materials(
+                    task_id=task_id,
+                    params=params,
+                    plan=long_plan,
+                    chapter_audios=chapter_audios,
+                    progress_cb=_make_progress_cb(task_id, 38, 55),
+                    paid_source_confirmed=bool(
+                        getattr(params, "paid_source_confirmed", False)
+                    ),
+                )
+            except Exception as exc:
+                return _mark_task_failed(task_id, "materials", str(exc))
+            long_warnings.extend(material_warnings)
+    else:
+        source = str(params.video_source or "").strip().lower()
+        if source in {"pexels", "pixabay", "coverr"}:
+            sm.state.update_task(task_id, progress=40)
+            downloaded_videos, semantic_timeline = _try_semantic_matching(
+                task_id,
+                params,
+                video_script,
+                subtitle_path,
+                audio_duration,
+            )
+        if not downloaded_videos:
+            downloaded_videos = get_video_materials(
+                task_id,
+                params,
+                video_terms,
+                audio_duration,
+                loomloom_video_request=loomloom_video_request,
+            )
+            if (
+                downloaded_videos
+                and source == "local"
+                and _semantic_matching_enabled(params)
+            ):
+                semantic_videos, semantic_timeline = _try_semantic_matching(
+                    task_id,
+                    params,
+                    video_script,
+                    subtitle_path,
+                    audio_duration,
+                    local_paths=downloaded_videos,
+                )
+                if semantic_videos:
+                    downloaded_videos = semantic_videos
     if not downloaded_videos:
         return _mark_task_failed(
             task_id,
@@ -1680,6 +1833,7 @@ def _run_pipeline(
                 audio_file,
                 subtitle_path,
                 audio_duration,
+                semantic_timeline=semantic_timeline,
             )
         except Exception as exc:
             return _mark_task_failed(task_id, "video", str(exc))
@@ -1692,6 +1846,7 @@ def _run_pipeline(
                 audio_file,
                 subtitle_path,
                 audio_duration,
+                semantic_timeline=semantic_timeline,
             )
         )
 

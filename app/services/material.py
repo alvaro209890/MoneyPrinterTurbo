@@ -1,6 +1,8 @@
+import json
 import math
 import os
 import random
+import shutil
 import threading
 import time
 from pathlib import Path
@@ -12,7 +14,7 @@ from loguru import logger
 from moviepy.video.io.VideoFileClip import VideoFileClip
 
 from app.config import config
-from app.models.schema import MaterialInfo, VideoAspect, VideoConcatMode
+from app.models.schema import MaterialInfo, VideoAspect, VideoConcatMode, VideoSemanticPlan
 from app.services import material_cache, task_artifacts, volcengine_seedance
 from app.utils import utils
 
@@ -1576,6 +1578,287 @@ def _download_videos_by_script_order(
     logger.success(f"downloaded {len(video_paths)} ordered videos")
     _persist_material_sources(task_id, material_sources)
     return video_paths
+
+
+SCENE_MATERIALS_MANIFEST = "scene_materials_manifest.json"
+_SEMANTIC_SEARCH_THROTTLE_SECONDS = 0.2
+_STOCK_VIDEO_SOURCES = frozenset({"pexels", "pixabay", "coverr"})
+
+
+def _scene_search_backend(source: str):
+    provider = "pexels"
+    remote_search = search_videos_pexels
+    if source == "pixabay":
+        provider = "pixabay"
+        remote_search = search_videos_pixabay
+    elif source == "coverr":
+        provider = "coverr"
+        remote_search = search_videos_coverr
+
+    def search_videos(search_term: str, minimum_duration: int, video_aspect: VideoAspect):
+        return _search_videos_with_cache(
+            provider=provider,
+            search_videos=remote_search,
+            search_term=search_term,
+            minimum_duration=minimum_duration,
+            video_aspect=video_aspect,
+        )
+
+    return provider, search_videos
+
+
+def _probe_clip_meta(path: str) -> tuple[float, list[int]]:
+    duration = 0.0
+    resolution = [0, 0]
+    clip = None
+    try:
+        clip = VideoFileClip(path)
+        duration = float(clip.duration or 0.0)
+        width, height = clip.size
+        resolution = [int(width), int(height)]
+    except Exception as exc:
+        logger.debug(f"failed to probe clip {path}: {exc}")
+    finally:
+        if clip is not None:
+            try:
+                clip.close()
+            except Exception:
+                pass
+    return duration, resolution
+
+
+def _copy_scene_clip(src: str, task_directory: str, scene_index: int, clip_index: int) -> str:
+    dest = os.path.join(
+        task_directory, f"scene_{scene_index:02d}_clip_{clip_index:02d}.mp4"
+    )
+    if os.path.abspath(src) == os.path.abspath(dest):
+        return dest
+    try:
+        shutil.copy2(src, dest)
+        return dest
+    except Exception as exc:
+        logger.warning(f"failed to copy scene clip to {dest}: {exc}")
+        return src
+
+
+def _score_local_path(path: str, terms: list[str]) -> int:
+    name = Path(path).stem.lower().replace("_", " ").replace("-", " ")
+    score = 0
+    for term in terms:
+        for word in str(term).lower().split():
+            if len(word) > 2 and word in name:
+                score += 1
+    return score
+
+
+def _scene_term_levels(scene, video_subject: str) -> list[tuple[int, list[str]]]:
+    specific = [term for term in (scene.search_terms or []) if str(term).strip()]
+    conceptual = [
+        term
+        for term in (scene.visual_keywords or [])
+        if str(term).strip() and term not in specific
+    ]
+    if scene.visual_description and not conceptual:
+        words = [
+            word
+            for word in str(scene.visual_description).split()
+            if len(word) > 3
+        ]
+        if words:
+            conceptual.append(" ".join(words[:6]))
+    general = []
+    if video_subject:
+        general.append(video_subject)
+        if scene.mood and scene.mood != "neutral":
+            general.append(f"{video_subject} {scene.mood}")
+    levels = []
+    if specific:
+        levels.append((1, specific))
+    if conceptual:
+        levels.append((2, conceptual))
+    if general:
+        levels.append((3, general))
+    return levels
+
+
+def _persist_scene_manifest(task_id: str, manifest: list[dict[str, Any]]) -> str:
+    path = os.path.join(utils.task_dir(task_id), SCENE_MATERIALS_MANIFEST)
+    try:
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(manifest, handle, ensure_ascii=False, indent=2)
+    except Exception as exc:
+        logger.warning(f"failed to persist scene materials manifest: {exc}")
+    return path
+
+
+def download_materials_for_scenes(
+    task_id: str,
+    semantic_plan: VideoSemanticPlan,
+    video_source: str,
+    video_aspect: VideoAspect,
+    max_clips_per_scene: int = 2,
+    local_paths: list[str] | None = None,
+) -> list[dict]:
+    """
+    Busca e baixa clipes por cena, com fallback em 3 níveis, e grava
+    ``scene_materials_manifest.json`` na pasta da tarefa.
+    """
+    source = (video_source or "pexels").strip().lower()
+    aspect = VideoAspect(video_aspect)
+    task_directory = utils.task_dir(task_id)
+    manifest: list[dict[str, Any]] = []
+    material_sources: list[dict[str, Any]] = []
+    used_urls: set[str] = set()
+    term_cache: dict[str, list[MaterialInfo]] = {}
+    local_pool = [path for path in (local_paths or []) if path and os.path.isfile(path)]
+    used_local: set[str] = set()
+
+    material_directory = config.app.get("material_directory", "").strip()
+    if material_directory == "task":
+        material_directory = task_directory
+    elif material_directory and not os.path.isdir(material_directory):
+        material_directory = ""
+
+    provider = source
+    search_videos = None
+    if source in _STOCK_VIDEO_SOURCES:
+        provider, search_videos = _scene_search_backend(source)
+
+    scenes = list(semantic_plan.scenes or [])
+    for scene in scenes:
+        collected_for_scene = 0
+        levels = _scene_term_levels(scene, semantic_plan.video_subject)
+        avoid = list(scene.must_avoid_terms or [])
+
+        if source == "local":
+            ranked = sorted(
+                local_pool,
+                key=lambda path: _score_local_path(
+                    path,
+                    [term for _, terms in levels for term in terms],
+                ),
+                reverse=True,
+            )
+            for path in ranked:
+                if collected_for_scene >= max_clips_per_scene:
+                    break
+                if path in used_local and collected_for_scene > 0:
+                    continue
+                duration, resolution = _probe_clip_meta(path)
+                dest = _copy_scene_clip(
+                    path, task_directory, scene.scene_index, collected_for_scene + 1
+                )
+                used_local.add(path)
+                manifest.append(
+                    {
+                        "file_path": dest,
+                        "target_scene_index": scene.scene_index,
+                        "search_term": semantic_plan.video_subject,
+                        "duration": duration,
+                        "resolution": resolution,
+                        "aspect": aspect.value,
+                        "fallback_level": 1,
+                    }
+                )
+                collected_for_scene += 1
+            continue
+
+        if search_videos is None:
+            continue
+
+        for level, terms in levels:
+            if collected_for_scene >= max_clips_per_scene:
+                break
+            for term in terms:
+                if collected_for_scene >= max_clips_per_scene:
+                    break
+                lowered = term.strip().lower()
+                if any(bad and bad.lower() in lowered for bad in avoid):
+                    continue
+                cache_key = f"{source}|{lowered}|{aspect.value}"
+                if cache_key not in term_cache:
+                    try:
+                        minimum = max(1, min(3, int(scene.duration or 3)))
+                        term_cache[cache_key] = search_videos(
+                            search_term=term,
+                            minimum_duration=minimum,
+                            video_aspect=aspect,
+                        )
+                    except Exception as exc:
+                        logger.warning(f"scene search failed for {term!r}: {exc}")
+                        term_cache[cache_key] = []
+                    time.sleep(_SEMANTIC_SEARCH_THROTTLE_SECONDS)
+                for item in term_cache[cache_key]:
+                    if collected_for_scene >= max_clips_per_scene:
+                        break
+                    if item.url in used_urls:
+                        continue
+                    try:
+                        saved = save_video(
+                            video_url=item.url, save_dir=material_directory
+                        )
+                    except Exception as exc:
+                        logger.error(
+                            "failed to download scene material: "
+                            f"provider={item.provider}, error={type(exc).__name__}"
+                        )
+                        continue
+                    if not saved:
+                        continue
+                    used_urls.add(item.url)
+                    dest = _copy_scene_clip(
+                        saved,
+                        task_directory,
+                        scene.scene_index,
+                        collected_for_scene + 1,
+                    )
+                    duration, resolution = _probe_clip_meta(dest)
+                    if duration <= 0:
+                        duration = float(item.duration or 0.0)
+                    manifest.append(
+                        {
+                            "file_path": dest,
+                            "target_scene_index": scene.scene_index,
+                            "search_term": term,
+                            "duration": duration,
+                            "resolution": resolution,
+                            "aspect": aspect.value,
+                            "fallback_level": level,
+                        }
+                    )
+                    try:
+                        material_sources.append(_material_source_record(item, dest))
+                    except Exception:
+                        pass
+                    collected_for_scene += 1
+
+        if collected_for_scene == 0 and manifest:
+            # Nunca deixa o slot sem vídeo: reusa o clipe temático mais recente.
+            donor = manifest[-1]
+            dest = _copy_scene_clip(
+                donor["file_path"],
+                task_directory,
+                scene.scene_index,
+                1,
+            )
+            reused = dict(donor)
+            reused.update(
+                {
+                    "file_path": dest,
+                    "target_scene_index": scene.scene_index,
+                    "fallback_level": 3,
+                }
+            )
+            manifest.append(reused)
+
+    _persist_scene_manifest(task_id, manifest)
+    if material_sources:
+        _persist_material_sources(task_id, material_sources)
+    logger.success(
+        f"scene materials ready: {len(manifest)} clips for "
+        f"{len(scenes)} scenes"
+    )
+    return manifest
 
 
 if __name__ == "__main__":

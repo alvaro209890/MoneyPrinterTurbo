@@ -64,6 +64,38 @@ class MaterialInfo:
     source_info: Optional[dict[str, Any]] = None
 
 
+class ScenePrompt(BaseModel):
+    """Uma cena visual alinhada a um intervalo da narração."""
+
+    scene_index: int
+    start_time: float
+    end_time: float
+    duration: float = 0.0
+    narration_text: str = ""
+    visual_description: str = ""
+    search_terms: List[str] = Field(default_factory=list)
+    visual_keywords: List[str] = Field(default_factory=list)
+    mood: Optional[str] = "neutral"
+    must_avoid_terms: Optional[List[str]] = Field(default_factory=list)
+    historical_era: Optional[str] = None
+    fallback_level: int = 1
+
+    @model_validator(mode="after")
+    def _fill_duration(self):
+        if self.duration <= 0:
+            self.duration = max(0.0, float(self.end_time) - float(self.start_time))
+        return self
+
+
+class VideoSemanticPlan(BaseModel):
+    """Plano de cenas visuais para um vídeo (curto ou um capítulo longo)."""
+
+    video_subject: str = ""
+    historical_era: str = ""
+    total_duration: float = 0.0
+    scenes: List[ScenePrompt] = Field(default_factory=list)
+
+
 class ChapterOutlineItem(BaseModel):
     """
     长视频大纲中的单个章节。
@@ -101,6 +133,10 @@ class VideoParams(BaseModel):
     video_clip_duration: int = Field(default=5, ge=1)
     video_clip_speed: Optional[float] = 1.0
     match_materials_to_script: bool = False
+    enable_semantic_matching: bool = True
+    semantic_min_scene_duration: float = Field(default=3.5, ge=1.0, le=30.0)
+    semantic_max_scene_duration: float = Field(default=7.0, ge=1.0, le=30.0)
+    semantic_search_provider: str = "pexels"
     video_count: int = Field(default=1, ge=1)
 
     video_source: Optional[str] = "pexels"
@@ -170,6 +206,10 @@ class VideoParams(BaseModel):
 
     @model_validator(mode="after")
     def _validate_long_mode(self):
+        if self.semantic_min_scene_duration > self.semantic_max_scene_duration:
+            raise ValueError(
+                "semantic_min_scene_duration must be <= semantic_max_scene_duration"
+            )
         if self.video_mode != const.VIDEO_MODE_LONG:
             return self
 

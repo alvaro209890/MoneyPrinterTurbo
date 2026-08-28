@@ -36,6 +36,20 @@ class TestVideoParams(unittest.TestCase):
         self.assertEqual(params.video_clip_duration, 1)
         self.assertEqual(params.video_count, 1)
 
+    def test_semantic_matching_defaults_and_bounds(self):
+        params = VideoParams(video_subject="Coffee")
+        self.assertTrue(params.enable_semantic_matching)
+        self.assertEqual(params.semantic_min_scene_duration, 3.5)
+        self.assertEqual(params.semantic_max_scene_duration, 7.0)
+        self.assertEqual(params.semantic_search_provider, "pexels")
+
+        with self.assertRaises(ValidationError):
+            VideoParams(
+                video_subject="Coffee",
+                semantic_min_scene_duration=8.0,
+                semantic_max_scene_duration=3.0,
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

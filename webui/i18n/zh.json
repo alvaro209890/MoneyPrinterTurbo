@@ -106,6 +106,8 @@
     "Number of Videos Generated Simultaneously": "同时生成视频数量",
     "Match Materials to Script Order": "按文案顺序匹配画面",
     "Match Materials to Script Order Help": "按文案顺序生成关键词并匹配素材，使画面更贴近当前旁白。",
+    "Semantic Scene Matching": "智能语义场景对齐（AI）",
+    "Semantic Scene Matching Help": "AI 会逐秒分析旁白，并搜索与当前讲述内容完全对应的画面素材。",
     "Audio Settings": "**音频设置**",
     "Voiceover Mode": "配音方式",
     "Automatic Voiceover": "自动配音",

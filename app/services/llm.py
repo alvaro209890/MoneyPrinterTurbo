@@ -704,6 +704,146 @@ Please note that you must use English for generating video search terms; Chinese
     return search_terms
 
 
+_TRAILING_COMMA_RE = re.compile(r",(\s*[}\]])")
+
+
+def parse_scene_prompts_response(response: str) -> list[dict]:
+    """Parseia JSON de prompts de cena com resiliência a fences e vírgulas extras."""
+    text = _strip_code_fence(response or "")
+    if not text:
+        return []
+
+    candidates = [text]
+    match = re.search(r"\[.*]", text, re.DOTALL)
+    if match:
+        candidates.append(match.group())
+    object_match = re.search(r"\{.*}", text, re.DOTALL)
+    if object_match:
+        candidates.append(object_match.group())
+
+    for candidate in candidates:
+        payload = _loads_scene_json(candidate)
+        scenes = _coerce_scene_prompt_list(payload)
+        if scenes:
+            return scenes
+    return []
+
+
+def _loads_scene_json(text: str):
+    try:
+        return json.loads(text)
+    except Exception:
+        repaired = _TRAILING_COMMA_RE.sub(r"\1", text)
+        repaired = repaired.replace("'", '"')
+        try:
+            return json.loads(repaired)
+        except Exception:
+            return None
+
+
+def _coerce_scene_prompt_list(payload) -> list[dict]:
+    if isinstance(payload, list):
+        return [item for item in payload if isinstance(item, dict)]
+    if isinstance(payload, dict):
+        for key in ("scenes", "data", "result", "prompts"):
+            value = payload.get(key)
+            if isinstance(value, list):
+                return [item for item in value if isinstance(item, dict)]
+        if "scene_index" in payload:
+            return [payload]
+    return []
+
+
+def generate_scene_prompts(
+    scenes_data: list,
+    subject: str,
+    historical_era: str = "",
+    app_config=None,
+) -> list[dict]:
+    """Gera prompts visuais estruturados para cada cena da narração."""
+    if not scenes_data:
+        return []
+
+    scene_lines = []
+    for scene in scenes_data:
+        index = scene.get("scene_index")
+        start = scene.get("start_time")
+        end = scene.get("end_time")
+        text = scene.get("narration_text") or ""
+        scene_lines.append(
+            f"{index}. [{start:.2f}s -> {end:.2f}s] {text}"
+        )
+    scenes_block = "\n".join(scene_lines)
+    era_line = historical_era.strip() or "infer from the subject and narration"
+    prompt = f"""
+# Role: Stock Footage Visual Prompt Designer
+
+## Goals:
+For each numbered narration scene, produce concrete English stock-video search terms
+that show EXACTLY what is being said at that moment.
+
+## Constraints:
+1. Return a JSON array only. No markdown, no commentary.
+2. One object per scene, matching scene_index.
+3. search_terms must be concrete visual phrases in English (2-6 words), never
+   abstract words like "history", "thinking", "concept", "idea".
+4. If the narration mentions a specific object (F-22, radar, horse, steam train),
+   the search terms MUST name that object.
+5. Historical era: {era_line}.
+   Avoid anachronisms (no muskets/Napoleonic troops for 1980s Cold War; no
+   modern airliners for 1940s bombers).
+6. NEVER use stock clichés: hacker mask, Anonymous/Guy Fawkes mask, hooded hacker,
+   person with magnifying glass at a monitor, generic "guy at laptop" when the
+   scene is aviation, military systems, or code bugs.
+7. must_avoid_terms lists visuals that would be wrong for that scene.
+8. visual_keywords are extra scoring tokens in English.
+
+## Output schema:
+[
+  {{
+    "scene_index": 1,
+    "visual_description": "what should appear on screen",
+    "search_terms": ["f22 raptor taking off", "fighter jet runway"],
+    "visual_keywords": ["military aviation", "stealth fighter"],
+    "mood": "dramatic",
+    "must_avoid_terms": ["hacker mask", "commercial airliner window"],
+    "historical_era": "{era_line}"
+  }}
+]
+
+## Context:
+### Video Subject
+{subject}
+
+### Scenes
+{scenes_block}
+""".strip()
+
+    response = ""
+    prompts: list[dict] = []
+    for attempt in range(_max_retries):
+        try:
+            if app_config is None:
+                response = _generate_response(prompt)
+            else:
+                response = _generate_response(prompt, app_config=app_config)
+            if isinstance(response, str) and response.startswith("Error: "):
+                logger.error(f"failed to generate scene prompts: {response}")
+                return []
+            prompts = parse_scene_prompts_response(response)
+            if prompts:
+                break
+        except Exception as exc:
+            logger.warning(f"failed to generate scene prompts: {exc}")
+        if attempt < _max_retries - 1:
+            logger.warning(
+                f"failed to generate scene prompts, trying again... {attempt + 1}"
+            )
+
+    logger.success(f"scene prompts ready: {len(prompts)} items")
+    return prompts
+
+
 # =============================================================================
 # Social publishing metadata
 #
