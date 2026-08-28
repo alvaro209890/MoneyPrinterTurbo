@@ -314,5 +314,153 @@ class TestLongModePreflight(unittest.TestCase):
         )
 
 
+class TestLongCli(unittest.TestCase):
+    """Contrato da CLI — é por aqui que o agente Hermes dispara o modo longo."""
+
+    def setUp(self):
+        import cli
+
+        self.cli = cli
+
+    def _params(self, argv):
+        return self.cli.build_video_params(self.cli.parse_args(argv))
+
+    def test_existing_short_invocation_is_unchanged(self):
+        params = self._params(["--video-subject", "Coffee"])
+        self.assertEqual(params.video_mode, const.VIDEO_MODE_SHORT)
+        self.assertEqual(params.video_aspect, "9:16")
+        self.assertEqual(params.video_clip_duration, 5)
+        self.assertEqual(params.paragraph_number, 1)
+
+    def test_long_flag_switches_mode(self):
+        params = self._params(["--video-subject", "x", "--long", "--duration", "12"])
+        self.assertEqual(params.video_mode, const.VIDEO_MODE_LONG)
+        self.assertEqual(params.target_duration_minutes, 12)
+
+    def test_long_without_duration_defaults_to_ten_minutes(self):
+        params = self._params(["--video-subject", "x", "--long"])
+        self.assertEqual(params.target_duration_minutes, 10.0)
+
+    def test_long_defaults_to_landscape(self):
+        from app.services import long_video
+
+        params = long_video.apply_long_video_defaults(
+            self._params(["--video-subject", "x", "--long"])
+        )
+        self.assertEqual(params.video_aspect, "16:9")
+
+    def test_explicit_aspect_survives_long_defaults(self):
+        from app.services import long_video
+
+        params = long_video.apply_long_video_defaults(
+            self._params(["--video-subject", "x", "--long", "--video-aspect", "9:16"])
+        )
+        self.assertEqual(params.video_aspect, "9:16")
+
+    def test_duration_without_long_is_rejected(self):
+        # Aceitar silenciosamente faria o usuário pedir 12 minutos e receber 30 s.
+        with self.assertRaises(SystemExit):
+            self.cli.parse_args(["--video-subject", "x", "--duration", "12"])
+
+    def test_duration_above_cap_is_rejected_by_argparse(self):
+        with self.assertRaises(SystemExit):
+            self.cli.parse_args(["--video-subject", "x", "--long", "--duration", "40"])
+
+    def test_duration_below_minimum_is_rejected(self):
+        with self.assertRaises(SystemExit):
+            self.cli.parse_args(["--video-subject", "x", "--long", "--duration", "1"])
+
+    def test_chapter_count_bounds_are_enforced(self):
+        for value in ("2", "20"):
+            with self.subTest(value=value):
+                with self.assertRaises(SystemExit):
+                    self.cli.parse_args(
+                        ["--video-subject", "x", "--long", "--chapters", value]
+                    )
+
+    def test_long_rejects_multiple_output_videos(self):
+        with self.assertRaises(SystemExit):
+            self.cli.parse_args(
+                ["--video-subject", "x", "--long", "--video-count", "3"]
+            )
+
+    def test_existing_seedance_confirmation_maps_to_paid_source_confirmed(self):
+        # A CLI já tinha --confirm-seedance-charge para a única fonte paga que
+        # ela expõe. O modo longo reusa esse sinal em vez de criar um segundo
+        # interruptor de confirmação.
+        params = self._params(
+            [
+                "--video-subject",
+                "x",
+                "--long",
+                "--video-source",
+                "volcengine_seedance",
+                "--confirm-seedance-charge",
+            ]
+        )
+        self.assertTrue(params.paid_source_confirmed)
+
+    def test_seedance_without_confirmation_is_still_refused(self):
+        with self.assertRaises(SystemExit):
+            self.cli.parse_args(
+                [
+                    "--video-subject",
+                    "x",
+                    "--long",
+                    "--video-source",
+                    "volcengine_seedance",
+                ]
+            )
+
+    def test_paid_source_defaults_to_unconfirmed(self):
+        params = self._params(["--video-subject", "x", "--long"])
+        self.assertFalse(params.paid_source_confirmed)
+
+
+class TestOutlineFile(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+
+        import cli
+
+        self.cli = cli
+        self.directory = tempfile.mkdtemp()
+
+    def _write(self, payload):
+        import json
+        import os
+
+        path = os.path.join(self.directory, "outline.json")
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle)
+        return path
+
+    def test_bare_array_is_accepted(self):
+        path = self._write([{"title": "A", "brief": "b", "weight": 1.0}])
+        outline = self.cli._load_chapter_outline(path)
+        self.assertEqual(outline[0]["title"], "A")
+
+    def test_script_json_shape_is_accepted(self):
+        # Permite copiar direto o bloco long_video do script.json.
+        path = self._write({"chapters": [{"title": "A", "weight": 1.0}]})
+        self.assertEqual(len(self.cli._load_chapter_outline(path)), 1)
+
+    def test_missing_file_raises(self):
+        with self.assertRaises(ValueError):
+            self.cli._load_chapter_outline("/nope/outline.json")
+
+    def test_empty_array_raises(self):
+        with self.assertRaises(ValueError):
+            self.cli._load_chapter_outline(self._write([]))
+
+    def test_entry_without_title_raises(self):
+        with self.assertRaises(ValueError):
+            self.cli._load_chapter_outline(self._write([{"brief": "no title"}]))
+
+    def test_none_path_returns_none(self):
+        self.assertIsNone(self.cli._load_chapter_outline(None))
+        self.assertIsNone(self.cli._load_chapter_outline("  "))
+
+
 if __name__ == "__main__":
     unittest.main()

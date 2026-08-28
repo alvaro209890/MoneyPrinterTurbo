@@ -164,6 +164,9 @@ class VideoParams(BaseModel):
     chapter_outline: Optional[List[ChapterOutlineItem]] = None
     narrate_chapter_titles: bool = False
     normalize_loudness: bool = True
+    # 按条计费的素材源在长视频模式下需要显式确认：一条 35 分钟的视频要几百
+    # 个片段，误用会产生离谱的账单。
+    paid_source_confirmed: bool = False
 
     @model_validator(mode="after")
     def _validate_long_mode(self):

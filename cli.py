@@ -69,6 +69,33 @@ def _paragraph_count(value: str) -> int:
     return parsed
 
 
+def _long_duration_minutes(value: str) -> float:
+    """校验长视频目标时长。上限是硬性技术约束，必须在解析参数时就拒绝。"""
+    from app.models import const
+
+    minimum = const.LONG_VIDEO_MIN_DURATION_SECONDS / 60
+    maximum = const.LONG_VIDEO_MAX_DURATION_SECONDS / 60
+    parsed = float(value)
+    if not math.isfinite(parsed) or parsed < minimum or parsed > maximum:
+        raise argparse.ArgumentTypeError(
+            f"duration must be between {minimum:.0f} and {maximum:.0f} minutes, "
+            f"got {value!r}"
+        )
+    return parsed
+
+
+def _chapter_count(value: str) -> int:
+    from app.models import const
+
+    parsed = int(value)
+    if parsed < const.LONG_VIDEO_MIN_CHAPTERS or parsed > const.LONG_VIDEO_MAX_CHAPTERS:
+        raise argparse.ArgumentTypeError(
+            f"chapters must be between {const.LONG_VIDEO_MIN_CHAPTERS} and "
+            f"{const.LONG_VIDEO_MAX_CHAPTERS}, got {parsed}"
+        )
+    return parsed
+
+
 def _non_negative_float(value: str) -> float:
     parsed = float(value)
     if not math.isfinite(parsed) or parsed < 0:
@@ -249,6 +276,48 @@ Batch manifests:
         help="replace the default LLM system prompt for script generation",
     )
 
+    long_group = parser.add_argument_group("long-form video")
+    long_group.add_argument(
+        "--long",
+        action="store_true",
+        help=(
+            "generate a long-form video: chaptered script, chapter-sized TTS and "
+            "per-chapter materials, capped at 35 minutes"
+        ),
+    )
+    long_group.add_argument(
+        "--duration",
+        type=_long_duration_minutes,
+        default=None,
+        help="target length in minutes for --long, from 3 to 35 (default: 10)",
+    )
+    long_group.add_argument(
+        "--chapters",
+        type=_chapter_count,
+        default=None,
+        help="number of chapters for --long, from 3 to 14 (default: automatic)",
+    )
+    long_group.add_argument(
+        "--outline",
+        default=None,
+        help=(
+            "path to a JSON array of {title, brief, weight} chapters; skips outline "
+            "generation and uses the supplied structure"
+        ),
+    )
+    long_group.add_argument(
+        "--narrate-chapter-titles",
+        action="store_true",
+        help="read chapter titles aloud as part of the narration",
+    )
+    long_group.add_argument(
+        "--no-normalize-loudness",
+        dest="normalize_loudness",
+        action="store_false",
+        default=None,
+        help="skip the -14 LUFS normalisation applied to long videos by default",
+    )
+
     material_group = parser.add_argument_group("materials and pipeline")
     material_group.add_argument(
         "--video-source",
@@ -291,8 +360,11 @@ Batch manifests:
     video_group.add_argument(
         "--video-aspect",
         choices=["9:16", "16:9", "1:1"],
-        default="9:16",
-        help="output aspect ratio: portrait, landscape, or square",
+        # 默认值留空由后面解析：短视频仍然是 9:16，而长视频在用户没有指定时
+        # 应该拿到 16:9。如果这里写死默认值，长视频的差异化默认值就永远
+        # 无法生效——它只填充"调用方未显式设置"的字段。
+        default=None,
+        help="output aspect ratio: portrait, landscape, or square (default: 9:16; 16:9 with --long)",
     )
     video_group.add_argument(
         "--video-concat-mode",
@@ -544,6 +616,24 @@ Batch manifests:
             "(search terms are not generated for local sources)"
         )
 
+    # 长视频专用参数不能在没有 --long 的情况下静默生效：那样用户会以为自己
+    # 请求了一条 12 分钟的视频，实际拿到的却是 30 秒的短视频。
+    if not args.long:
+        for flag, value in (
+            ("--duration", args.duration),
+            ("--chapters", args.chapters),
+            ("--outline", args.outline),
+        ):
+            if value is not None:
+                parser.error(f"{flag} requires --long")
+        if args.narrate_chapter_titles:
+            parser.error("--narrate-chapter-titles requires --long")
+        if args.normalize_loudness is not None:
+            parser.error("--no-normalize-loudness requires --long")
+
+    if args.long and args.video_count != 1:
+        parser.error("--long produces a single video; --video-count must be 1")
+
     stage_requires_materials = args.stop_at in {"materials", "video"}
     has_video_materials = bool((args.video_materials or "").strip())
     if (
@@ -709,10 +799,43 @@ def build_video_params(args: argparse.Namespace) -> VideoParams:
         "video_source": args.video_source,
         "video_materials": video_materials,
         "video_count": args.video_count,
-        "video_aspect": args.video_aspect,
         "voice_name": _resolve_voice_name(args, ui_config),
         "subtitle_enabled": _resolve_subtitle_enabled(args, ui_config),
     }
+
+    is_long = bool(getattr(args, "long", False))
+    if args.video_aspect is not None:
+        params_kwargs["video_aspect"] = args.video_aspect
+    elif not is_long:
+        # 短视频保持原有默认值，行为与改动前完全一致。
+        params_kwargs["video_aspect"] = "9:16"
+    # 长视频且未指定时刻意不设置该键，交给 apply_long_video_defaults 填 16:9。
+
+    if is_long:
+        from app.models import const as _const
+
+        params_kwargs["video_mode"] = _const.VIDEO_MODE_LONG
+        if args.duration is not None:
+            params_kwargs["target_duration_minutes"] = args.duration
+        if args.chapters is not None:
+            params_kwargs["chapter_count"] = args.chapters
+        if getattr(args, "narrate_chapter_titles", False):
+            params_kwargs["narrate_chapter_titles"] = True
+        if args.normalize_loudness is not None:
+            params_kwargs["normalize_loudness"] = args.normalize_loudness
+        outline = _load_chapter_outline(getattr(args, "outline", None))
+        if outline is not None:
+            params_kwargs["chapter_outline"] = outline
+        if args.duration is None and outline is None:
+            # 明确写入默认目标时长，避免调用方拿到一个既没有时长也没有大纲的
+            # 长视频参数（模型校验器会拒绝这种组合）。
+            params_kwargs["target_duration_minutes"] = 10.0
+        # 付费素材源的确认复用已有的 --confirm-seedance-charge，不再引入平行
+        # 的确认开关：CLI 目前只暴露 volcengine_seedance 这一个付费源，两套
+        # 确认机制只会让用户困惑。wavespeed 仅存在于 API/WebUI，由它们各自
+        # 设置 paid_source_confirmed。
+        if getattr(args, "confirm_seedance_charge", False):
+            params_kwargs["paid_source_confirmed"] = True
 
     optional_arg_names = [
         "video_language",
@@ -813,6 +936,50 @@ def build_video_params(args: argparse.Namespace) -> VideoParams:
             params_kwargs["text_background_color"] = True
 
     return VideoParams(**params_kwargs)
+
+
+def _load_chapter_outline(raw_path: str | None):
+    """
+    读取 --outline 指定的章节大纲文件。
+
+    大纲由 ``--stop-at script`` 预览产出，人工调整后再喂回来。这条路径可以
+    完全跳过大纲生成，也让 Hermes 能先审阅结构再决定是否渲染。
+    """
+    path_value = (raw_path or "").strip()
+    if not path_value:
+        return None
+
+    expanded = os.path.expanduser(path_value)
+    if not os.path.isfile(expanded):
+        raise ValueError(f"outline file does not exist: {path_value}")
+    try:
+        with open(expanded, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"outline file is not valid json: {exc}") from exc
+
+    # 同时接受裸数组和 {"chapters": [...]} —— 后者正是 script.json 里
+    # long_video 字段的结构，可以直接复制粘贴。
+    if isinstance(payload, dict):
+        payload = payload.get("chapters")
+    if not isinstance(payload, list) or not payload:
+        raise ValueError("outline file must contain a non-empty array of chapters")
+
+    outline = []
+    for entry in payload:
+        if not isinstance(entry, dict):
+            raise ValueError("each outline entry must be an object")
+        title = str(entry.get("title") or "").strip()
+        if not title:
+            raise ValueError("each outline entry must have a non-empty title")
+        outline.append(
+            {
+                "title": title,
+                "brief": str(entry.get("brief") or "").strip(),
+                "weight": float(entry.get("weight") or 0.0),
+            }
+        )
+    return outline
 
 
 def _load_batch_manifest(raw_path: str) -> tuple[str, list[dict[str, Any]]]:
