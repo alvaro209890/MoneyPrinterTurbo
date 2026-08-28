@@ -18,6 +18,10 @@ from app.services import bgm as bgm_service
 from app.services import (
     elevenlabs_music,
     llm,
+    long_audio,
+    long_materials,
+    long_render,
+    long_video,
     loomloom,
     material,
     sonilo,
@@ -283,6 +287,46 @@ def _mark_task_failed(
         **failure_details,
     )
     return failure
+
+
+def _make_progress_cb(task_id: str, start: int, end: int):
+    """
+    把子流程 0..1 的完成度映射到全局进度区间。
+
+    长视频的单个阶段可能持续十几分钟。没有这个映射，进度条会在 20% 停很久，
+    用户无法区分"正在写第 7 章"和"任务卡死了"。
+    """
+
+    span = max(0, end - start)
+
+    def report(fraction: float) -> None:
+        try:
+            value = start + int(span * max(0.0, min(1.0, float(fraction))))
+            sm.state.update_task(
+                task_id, state=const.TASK_STATE_PROCESSING, progress=value
+            )
+        except Exception as exc:
+            # 进度上报属于可观测性，绝不能影响正在进行的生成。
+            logger.debug(f"failed to report progress: {exc}")
+
+    return report
+
+
+def generate_long_script(task_id, params):
+    """长视频模式的文案生成：大纲 + 逐章生成 + 关键词。返回 (计划, None) 或 (None, 失败)。"""
+    logger.info("\n\n## generating long-form video script")
+    try:
+        plan = long_video.build_long_script(
+            params, progress_cb=_make_progress_cb(task_id, 8, 18)
+        )
+    except Exception as exc:
+        return None, _mark_task_failed(task_id, "script", str(exc))
+
+    if not plan.chapters or not plan.full_script.strip():
+        return None, _mark_task_failed(
+            task_id, "script", "long-video script generation produced no content"
+        )
+    return plan, None
 
 
 def generate_script(task_id, params):
@@ -792,6 +836,75 @@ def _record_loomloom_run_reference(
     return None
 
 
+def generate_long_final_video(
+    task_id, params, downloaded_videos, audio_file, subtitle_path, audio_duration
+):
+    """
+    长视频的成片流程，返回与 generate_final_videos 相同的三元组。
+
+    与短视频的差异集中在两点：拼接走 FFmpeg（内存恒定），以及成片额外经过
+    响度归一化和技术验收——频道的发布检查要求 −14 LUFS 和 faststart，在这里
+    完成可以让上传流程不必再做后处理。
+    """
+    warnings: list[dict] = []
+    combined_video_path = path.join(utils.task_dir(task_id), "combined-1.mp4")
+    final_video_path = path.join(utils.task_dir(task_id), "final-1.mp4")
+
+    logger.info(f"\n\n## combining long video => {combined_video_path}")
+    long_render.render_long_video(
+        task_id=task_id,
+        params=params,
+        material_paths=downloaded_videos,
+        audio_duration=audio_duration,
+        output_file=combined_video_path,
+        progress_cb=_make_progress_cb(task_id, 55, 85),
+    )
+
+    logger.info(f"\n\n## generating long video => {final_video_path}")
+    video.generate_video(
+        video_path=combined_video_path,
+        audio_path=audio_file,
+        subtitle_path=subtitle_path,
+        output_file=final_video_path,
+        params=params,
+    )
+    sm.state.update_task(task_id, progress=92)
+
+    if getattr(params, "normalize_loudness", True):
+        normalized_path = path.join(utils.task_dir(task_id), "final-1-normalized.mp4")
+        result = long_audio.normalize_loudness(final_video_path, normalized_path)
+        if result == normalized_path and path.isfile(normalized_path):
+            # 用归一化结果替换成片，保持 final-1.mp4 始终是"可发布的那一个"。
+            # 下游（WebUI、CLI、Hermes）都按这个文件名取产物。
+            try:
+                os.replace(normalized_path, final_video_path)
+            except OSError as exc:
+                logger.warning(f"failed to replace final video with normalized: {exc}")
+        else:
+            warnings.append({"code": "long_video_loudness_failed"})
+
+    sm.state.update_task(task_id, progress=96)
+
+    report = long_render.verify_long_video(
+        final_video_path, expected_duration=audio_duration
+    )
+    if not report.passed:
+        # 验收不通过不直接丢弃成片：文件仍然存在，由调用方和人工决定是否发布。
+        # 但问题必须显式暴露，不能让上传流程以为一切正常。
+        logger.warning(f"long video verification problems: {report.problems}")
+        warnings.append(
+            {"code": "long_video_verification_failed", "problems": report.problems}
+        )
+
+    long_render.cleanup_render_workdir(task_id)
+    try:
+        long_materials.write_credits_file(task_id)
+    except Exception as exc:
+        logger.warning(f"failed to write credits file: {exc}")
+
+    return [final_video_path], [combined_video_path], warnings, report
+
+
 def generate_final_videos(
     task_id, params, downloaded_videos, audio_file, subtitle_path, audio_duration
 ):
@@ -1250,6 +1363,22 @@ def _run_pipeline(
     logger.info(f"start task: {task_id}, stop_at: {stop_at}")
     sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=5)
 
+    # 长视频模式的预检必须在消耗任何 LLM / TTS / 素材配额之前完成：超出时长
+    # 上限或误选按条计费的素材源，都应该在这里就明确失败。
+    is_long = long_video.is_long_mode(params)
+    long_plan = None
+    long_warnings: list[dict] = []
+    if is_long:
+        params = long_video.apply_long_video_defaults(params)
+        try:
+            long_video.resolve_target_seconds(params)
+            long_materials.ensure_source_is_allowed(
+                params.video_source,
+                confirmed=bool(getattr(params, "paid_source_confirmed", False)),
+            )
+        except (ValueError, long_materials.PaidSourceNotConfirmedError) as exc:
+            return _mark_task_failed(task_id, "preflight", str(exc))
+
     if (
         stop_at in {"materials", "video"}
         and params.video_source == "volcengine_seedance"
@@ -1313,27 +1442,44 @@ def _run_pipeline(
         )
 
     # 1. Generate script
-    video_script = generate_script(task_id, params)
-    if not video_script or "Error: " in video_script:
-        error = (
-            video_script.removeprefix("Error: ").strip()
-            if isinstance(video_script, str) and "Error: " in video_script
-            else "failed to generate video script"
-        )
-        return _mark_task_failed(task_id, "script", error)
+    if is_long:
+        long_plan, failure = generate_long_script(task_id, params)
+        if failure is not None:
+            return failure
+        video_script = long_plan.full_script
+    else:
+        video_script = generate_script(task_id, params)
+        if not video_script or "Error: " in video_script:
+            error = (
+                video_script.removeprefix("Error: ").strip()
+                if isinstance(video_script, str) and "Error: " in video_script
+                else "failed to generate video script"
+            )
+            return _mark_task_failed(task_id, "script", error)
 
-    sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=10)
+    sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=18)
 
     if stop_at == "script":
+        extra = {"long_video": long_video.plan_to_dict(long_plan)} if is_long else {}
         sm.state.update_task(
-            task_id, state=const.TASK_STATE_COMPLETE, progress=100, script=video_script
+            task_id,
+            state=const.TASK_STATE_COMPLETE,
+            progress=100,
+            script=video_script,
+            **extra,
         )
-        return {"script": video_script}
+        return {"script": video_script, **extra}
 
     # 2. Generate terms
     video_terms = ""
     if params.video_source != "local":
-        video_terms = generate_terms(task_id, params, video_script)
+        if is_long:
+            # 关键词按章生成并保持叙事顺序；长视频不做 TwelveLabs 语义重排，
+            # 否则素材会脱离时间线。
+            long_plan = long_video.generate_chapter_terms(long_plan)
+            video_terms = long_plan.collect_terms()
+        else:
+            video_terms = generate_terms(task_id, params, video_script)
         if not video_terms:
             return _mark_task_failed(
                 task_id,
@@ -1342,6 +1488,10 @@ def _run_pipeline(
             )
 
     save_script_data(task_id, video_script, video_terms, params)
+    if is_long:
+        task_artifacts.patch_script_data(
+            task_id, long_video=long_video.plan_to_dict(long_plan)
+        )
 
     if stop_at == "terms":
         sm.state.update_task(
@@ -1352,21 +1502,46 @@ def _run_pipeline(
     sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=20)
 
     # 3. Generate audio
-    audio_file, audio_duration, sub_maker = generate_audio(
-        task_id,
-        params,
-        video_script,
-        voice_preview=voice_preview,
-        allow_server_file_input=allow_server_file_input,
-    )
-    if not audio_file:
-        return _mark_task_failed(
+    chapter_audios: list = []
+    if is_long and not getattr(params, "custom_audio_file", None):
+        try:
+            audio_file, audio_duration, chapter_audios, audio_warnings = (
+                long_audio.synthesize_long_narration(
+                    task_id,
+                    params,
+                    long_plan,
+                    progress_cb=_make_progress_cb(task_id, 20, 35),
+                )
+            )
+        except Exception as exc:
+            return _mark_task_failed(task_id, "audio", str(exc))
+        long_warnings.extend(audio_warnings)
+        sub_maker = None
+    else:
+        audio_file, audio_duration, sub_maker = generate_audio(
             task_id,
-            "audio",
-            "failed to prepare narration audio",
+            params,
+            video_script,
+            voice_preview=voice_preview,
+            allow_server_file_input=allow_server_file_input,
         )
+        if not audio_file:
+            return _mark_task_failed(
+                task_id,
+                "audio",
+                "failed to prepare narration audio",
+            )
+        # 自定义音频同样受时长上限约束：上限是技术约束，不是"我们生成的内容"
+        # 的约束。
+        if is_long and audio_duration > const.LONG_VIDEO_MAX_DURATION_SECONDS:
+            return _mark_task_failed(
+                task_id,
+                "audio",
+                f"custom audio is {audio_duration:.0f}s, above the "
+                f"{const.LONG_VIDEO_MAX_DURATION_SECONDS}s long-video cap",
+            )
 
-    sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=30)
+    sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=35)
 
     if stop_at == "audio":
         sm.state.update_task(
@@ -1378,9 +1553,20 @@ def _run_pipeline(
         return {"audio_file": audio_file, "audio_duration": audio_duration}
 
     # 4. Generate subtitle
-    subtitle_path = generate_subtitle(
-        task_id, params, video_script, sub_maker, audio_file
-    )
+    if is_long and chapter_audios:
+        # 各章字幕按累计的实际音频时长平移后合并。偏移必须来自测得的时长，
+        # 否则误差会随章节累积，在视频后半段明显错位。
+        subtitle_path = (
+            long_audio.build_long_subtitle(task_id, chapter_audios)
+            if params.subtitle_enabled
+            else ""
+        )
+        if params.subtitle_enabled and not subtitle_path:
+            logger.warning("long-video subtitles unavailable; continuing without them")
+    else:
+        subtitle_path = generate_subtitle(
+            task_id, params, video_script, sub_maker, audio_file
+        )
 
     if stop_at == "subtitle":
         sm.state.update_task(
@@ -1391,16 +1577,32 @@ def _run_pipeline(
         )
         return {"subtitle_path": subtitle_path}
 
-    sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=40)
+    sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=38)
 
     # 5. Get video materials
-    downloaded_videos = get_video_materials(
-        task_id,
-        params,
-        video_terms,
-        audio_duration,
-        loomloom_video_request=loomloom_video_request,
-    )
+    if is_long and params.video_source not in ("local", "loomloom"):
+        try:
+            downloaded_videos, material_warnings = long_materials.collect_materials(
+                task_id=task_id,
+                params=params,
+                plan=long_plan,
+                chapter_audios=chapter_audios,
+                progress_cb=_make_progress_cb(task_id, 38, 55),
+                paid_source_confirmed=bool(
+                    getattr(params, "paid_source_confirmed", False)
+                ),
+            )
+        except Exception as exc:
+            return _mark_task_failed(task_id, "materials", str(exc))
+        long_warnings.extend(material_warnings)
+    else:
+        downloaded_videos = get_video_materials(
+            task_id,
+            params,
+            video_terms,
+            audio_duration,
+            loomloom_video_request=loomloom_video_request,
+        )
     if not downloaded_videos:
         return _mark_task_failed(
             task_id,
@@ -1425,16 +1627,35 @@ def _run_pipeline(
         params.video_concat_mode = VideoConcatMode(params.video_concat_mode)
 
     # 6. Generate final videos
-    final_video_paths, combined_video_paths, generation_warnings = (
-        generate_final_videos(
-            task_id,
-            params,
-            downloaded_videos,
-            audio_file,
-            subtitle_path,
-            audio_duration,
+    verification_report = None
+    if is_long:
+        try:
+            (
+                final_video_paths,
+                combined_video_paths,
+                generation_warnings,
+                verification_report,
+            ) = generate_long_final_video(
+                task_id,
+                params,
+                downloaded_videos,
+                audio_file,
+                subtitle_path,
+                audio_duration,
+            )
+        except Exception as exc:
+            return _mark_task_failed(task_id, "video", str(exc))
+    else:
+        final_video_paths, combined_video_paths, generation_warnings = (
+            generate_final_videos(
+                task_id,
+                params,
+                downloaded_videos,
+                audio_file,
+                subtitle_path,
+                audio_duration,
+            )
         )
-    )
 
     if not final_video_paths:
         return _mark_task_failed(
@@ -1476,8 +1697,23 @@ def _run_pipeline(
         "cross_post_results": None,
         "cross_post_error": None,
         "cross_post_owner": _cross_post_process_owner if should_cross_post else None,
-        "warnings": generation_warnings or None,
+        "warnings": (long_warnings + (generation_warnings or [])) or None,
     }
+    if is_long and long_plan is not None:
+        # 章节结构和技术验收结果要进入任务状态：上传流程据此判断是否发布，
+        # 变更日志据此描述视频结构，都不需要再打开 MP4。
+        kwargs["long_video"] = {
+            **long_video.plan_to_dict(long_plan),
+            "duration_seconds": audio_duration,
+            "chapter_count": long_plan.chapter_count,
+            "truncated": any(
+                warning.get("code") == const.WARNING_LONG_VIDEO_TRUNCATED
+                for warning in long_warnings
+            ),
+            "verification": (
+                verification_report.to_dict() if verification_report else None
+            ),
+        }
     sm.state.update_task(
         task_id, state=const.TASK_STATE_COMPLETE, progress=100, **kwargs
     )
