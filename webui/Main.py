@@ -926,6 +926,33 @@ def _open_task_video(video_file):
         logger.error(f"failed to open task video: {normalized_file}, {e}")
 
 
+def _read_task_video(video_file):
+    """Le o MP4 da task para o botao de download.
+
+    Passado como CALLABLE para st.download_button: o Streamlit so executa isto
+    quando o usuario clica, numa thread separada. Sem isso o arquivo inteiro
+    seria lido a cada rerun do fragmento do painel (run_every="2s").
+    """
+    tasks_root = os.path.abspath(utils.task_dir())
+    normalized_file = os.path.abspath(video_file or "")
+    # Mesma restricao de _open_task_video: so serve arquivo dentro de storage/tasks.
+    if not normalized_file.startswith(tasks_root + os.sep):
+        logger.warning(f"invalid task video path for download: {normalized_file}")
+        return b""
+    if not os.path.isfile(normalized_file):
+        logger.warning(f"task video does not exist: {normalized_file}")
+        return b""
+    with open(normalized_file, "rb") as fh:
+        return fh.read()
+
+
+def _task_download_name(task, task_id):
+    """Nome amigavel do arquivo baixado: assunto higienizado + id curto."""
+    subject = (task.get("subject") or "").strip()
+    slug = re.sub(r"[^0-9A-Za-zÀ-ÿ]+", "-", subject).strip("-")[:50]
+    return f"{slug or 'video'}-{str(task_id)[:8]}.mp4"
+
+
 def _delete_task(task_id, task_path, task_state=None):
     # 页面展示的状态可能落后于后台任务。删除前同时检查传入状态、当前会话的
     # 活跃任务和最新状态，避免任务刚开始或已产出中间视频时被误删。
@@ -1028,7 +1055,7 @@ def _render_task_table(filtered_tasks, key_prefix):
                 key=f"task_row_{key_prefix}_{safe_task_key}", border=True
             ):
                 row_cols = st.columns(
-                    [1.1, 1.7, 3.0, 0.8, 1.6],
+                    [1.1, 1.7, 2.6, 0.8, 2.1],
                     vertical_alignment="center",
                 )
                 row_cols[0].write(_task_state_label(task["state"], has_video))
@@ -1037,7 +1064,7 @@ def _render_task_table(filtered_tasks, key_prefix):
                 row_cols[3].write(f"{task['progress']}%")
 
                 action_cols = row_cols[4].columns(
-                    4,
+                    5,
                     vertical_alignment="center",
                     gap="small",
                 )
@@ -1054,6 +1081,25 @@ def _render_task_table(filtered_tasks, key_prefix):
                         _open_task_video(task["video_file"])
 
                 with action_cols[1]:
+                    download_label = tr("Download")
+                    st.download_button(
+                        download_label,
+                        # callable: le o MP4 so no clique, fora do rerun de 2s
+                        data=(
+                            (lambda path=task["video_file"]: _read_task_video(path))
+                            if has_video
+                            else b""
+                        ),
+                        file_name=_task_download_name(task, task_id),
+                        mime="video/mp4",
+                        key=f"download_task_{key_prefix}_{task_id}",
+                        use_container_width=True,
+                        icon=":material/download:",
+                        help=download_label,
+                        disabled=not has_video,
+                    )
+
+                with action_cols[2]:
                     open_label = tr("Open Task Folder")
                     if st.button(
                         open_label,
@@ -1064,19 +1110,19 @@ def _render_task_table(filtered_tasks, key_prefix):
                     ):
                         _open_task_path(task["task_path"])
 
-                with action_cols[2]:
+                with action_cols[3]:
                     restore_label = tr("Regenerate Task")
                     if st.button(
                         restore_label,
                         key=f"restore_task_{key_prefix}_{task_id}",
                         use_container_width=True,
-                        icon=":material/replay:",
+                        icon=":material/history:",
                         help=restore_label,
-                        disabled=is_processing or not has_restore_data,
+                        disabled=is_busy or not has_restore_data,
                     ):
                         _queue_task_restore(task_id)
 
-                with action_cols[3]:
+                with action_cols[4]:
                     delete_label = tr("Delete Task")
                     delete_help = (
                         f"{delete_label} ({tr('Task Status Processing')})"

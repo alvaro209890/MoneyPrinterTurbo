@@ -24,7 +24,7 @@
 | 6 | Orquestrador | ✅ |
 | 7 | CLI e API | ✅ |
 | 8 | WebUI | ✅ |
-| 9 | QA completo | ⬜ |
+| 9 | QA completo | ✅ |
 | 10 | Publicação | ⬜ |
 | 11 | Hermes (5 superfícies) | ⬜ |
 | 12 | Encerramento | ⬜ |
