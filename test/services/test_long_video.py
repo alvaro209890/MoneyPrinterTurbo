@@ -1,5 +1,6 @@
 import sys
 import unittest
+import unittest.mock
 from pathlib import Path
 
 from pydantic import ValidationError
@@ -339,6 +340,364 @@ class TestLongVideoPlan(unittest.TestCase):
             ],
         )
         self.assertEqual(plan.estimated_seconds, 600)
+
+
+class TestOutlineParsing(unittest.TestCase):
+    def test_parses_plain_json_array(self):
+        items = long_video.parse_outline_response(
+            '[{"title": "A", "brief": "b", "weight": 0.5}]'
+        )
+        self.assertEqual(items[0]["title"], "A")
+
+    def test_parses_json_wrapped_in_code_fence(self):
+        # Claude/Gemini frequentemente envolvem o JSON em cerca de markdown.
+        raw = '```json\n[{"title": "A", "brief": "b", "weight": 1.0}]\n```'
+        self.assertEqual(len(long_video.parse_outline_response(raw)), 1)
+
+    def test_recovers_array_from_surrounding_prose(self):
+        raw = 'Claro! Aqui está:\n[{"title": "A", "brief": "b", "weight": 1.0}]\nEspero ajudar.'
+        self.assertEqual(len(long_video.parse_outline_response(raw)), 1)
+
+    def test_rejects_provider_error_string(self):
+        # _generate_response sinaliza falha com este prefixo; tratar como texto
+        # válido faria o pipeline seguir com um "roteiro" que é uma mensagem de erro.
+        with self.assertRaises(ValueError):
+            long_video.parse_outline_response("Error: quota exceeded")
+
+    def test_rejects_empty_response(self):
+        for value in ("", "   ", None):
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError):
+                    long_video.parse_outline_response(value)
+
+    def test_rejects_non_array_payload(self):
+        with self.assertRaises(ValueError):
+            long_video.parse_outline_response('{"title": "A"}')
+
+    def test_drops_entries_without_title(self):
+        items = long_video.parse_outline_response(
+            '[{"title": "", "brief": "x"}, {"title": "B", "brief": "y"}]'
+        )
+        self.assertEqual([item["title"] for item in items], ["B"])
+
+    def test_raises_when_no_entry_is_usable(self):
+        with self.assertRaises(ValueError):
+            long_video.parse_outline_response('[{"brief": "no title"}]')
+
+
+class TestPlanChapters(unittest.TestCase):
+    OUTLINE = (
+        '[{"title": "O erro", "brief": "o bug", "weight": 0.3},'
+        ' {"title": "A queda", "brief": "consequencia", "weight": 0.4},'
+        ' {"title": "A licao", "brief": "payoff", "weight": 0.3}]'
+    )
+
+    def test_chapter_seconds_sum_to_target(self):
+        with unittest.mock.patch(
+            "app.services.llm._generate_response", return_value=self.OUTLINE
+        ):
+            plan = long_video.plan_chapters("Ariane 5", 600, "pt-BR")
+        total = sum(chapter.target_seconds for chapter in plan.chapters)
+        self.assertAlmostEqual(total, 600, delta=1)
+
+    def test_chapters_are_indexed_from_one(self):
+        with unittest.mock.patch(
+            "app.services.llm._generate_response", return_value=self.OUTLINE
+        ):
+            plan = long_video.plan_chapters("Ariane 5", 600, "pt-BR")
+        self.assertEqual([c.index for c in plan.chapters], [1, 2, 3])
+
+    def test_supplied_outline_skips_the_llm_entirely(self):
+        outline = [ChapterOutlineItem(title="A", brief="x", weight=0.5)]
+        with unittest.mock.patch("app.services.llm._generate_response") as mocked:
+            plan = long_video.plan_chapters("Ariane 5", 600, "pt-BR", outline=outline)
+        mocked.assert_not_called()
+        self.assertEqual(plan.chapter_count, 1)
+
+    def test_retries_then_fails_with_clear_error(self):
+        with unittest.mock.patch(
+            "app.services.llm._generate_response", return_value="not json"
+        ) as mocked:
+            with self.assertRaises(ValueError):
+                long_video.plan_chapters("Ariane 5", 600, "pt-BR")
+        self.assertGreater(mocked.call_count, 1)
+
+    def test_recovers_when_a_later_attempt_succeeds(self):
+        responses = ["garbage", self.OUTLINE]
+        with unittest.mock.patch(
+            "app.services.llm._generate_response", side_effect=responses
+        ):
+            plan = long_video.plan_chapters("Ariane 5", 600, "pt-BR")
+        self.assertEqual(plan.chapter_count, 3)
+
+
+class TestChapterContinuity(unittest.TestCase):
+    def _plan(self):
+        return long_video.LongVideoPlan(
+            subject="Ariane 5",
+            language="pt-BR",
+            target_seconds=600,
+            chapters=[
+                long_video.Chapter(index=1, title="A", brief="ba", target_seconds=200),
+                long_video.Chapter(index=2, title="B", brief="bb", target_seconds=200),
+                long_video.Chapter(index=3, title="C", brief="bc", target_seconds=200),
+            ],
+        )
+
+    def test_requirements_include_full_outline(self):
+        plan = self._plan()
+        text = long_video.build_chapter_requirements(plan, plan.chapters[1])
+        for title in ("A", "B", "C"):
+            self.assertIn(title, text)
+
+    def test_requirements_stay_within_prompt_limit(self):
+        from app.services.llm import MAX_SCRIPT_PROMPT_LENGTH
+
+        plan = long_video.LongVideoPlan(
+            subject="x",
+            language="pt-BR",
+            target_seconds=2100,
+            chapters=[
+                long_video.Chapter(
+                    index=i + 1,
+                    title="t" * 200,
+                    brief="b" * 1000,
+                    target_seconds=150,
+                )
+                for i in range(14)
+            ],
+        )
+        text = long_video.build_chapter_requirements(
+            plan, plan.chapters[7], previous_tail="z" * 600
+        )
+        self.assertLessEqual(len(text), MAX_SCRIPT_PROMPT_LENGTH)
+
+    def test_first_chapter_is_told_to_hook(self):
+        plan = self._plan()
+        text = long_video.build_chapter_requirements(plan, plan.chapters[0])
+        self.assertIn("hook", text.lower())
+
+    def test_later_chapters_are_told_not_to_reintroduce(self):
+        plan = self._plan()
+        text = long_video.build_chapter_requirements(plan, plan.chapters[1])
+        self.assertIn("re-introduce", text.lower())
+
+    def test_final_chapter_is_told_to_close(self):
+        plan = self._plan()
+        text = long_video.build_chapter_requirements(plan, plan.chapters[2])
+        self.assertIn("final chapter", text.lower())
+
+    def test_previous_tail_is_injected_only_after_chapter_one(self):
+        plan = self._plan()
+        first = long_video.build_chapter_requirements(
+            plan, plan.chapters[0], previous_tail="fim anterior."
+        )
+        second = long_video.build_chapter_requirements(
+            plan, plan.chapters[1], previous_tail="fim anterior."
+        )
+        self.assertNotIn("fim anterior.", first)
+        self.assertIn("fim anterior.", second)
+
+
+class TestTailSentences(unittest.TestCase):
+    def test_returns_last_two_sentences(self):
+        text = "Uma. Duas. Tres. Quatro."
+        self.assertEqual(long_video.tail_sentences(text), "Tres. Quatro.")
+
+    def test_handles_text_without_terminators(self):
+        self.assertTrue(long_video.tail_sentences("sem pontuacao alguma"))
+
+    def test_empty_text_returns_empty(self):
+        self.assertEqual(long_video.tail_sentences(""), "")
+
+    def test_output_is_bounded(self):
+        self.assertLessEqual(len(long_video.tail_sentences("a. " * 5000)), 600)
+
+
+class TestGenerateChapterScript(unittest.TestCase):
+    def _plan(self):
+        return long_video.LongVideoPlan(
+            subject="Ariane 5",
+            language="pt-BR",
+            target_seconds=600,
+            chapters=[
+                long_video.Chapter(index=1, title="A", brief="b", target_seconds=600)
+            ],
+        )
+
+    def test_never_requests_more_paragraphs_than_allowed(self):
+        from app.services.llm import MAX_SCRIPT_PARAGRAPH_NUMBER
+
+        plan = self._plan()
+        with unittest.mock.patch(
+            "app.services.llm.generate_script", return_value="texto"
+        ) as mocked:
+            long_video.generate_chapter_script(plan, plan.chapters[0])
+        self.assertLessEqual(
+            mocked.call_args.kwargs["paragraph_number"], MAX_SCRIPT_PARAGRAPH_NUMBER
+        )
+
+    def test_uses_the_long_form_system_prompt(self):
+        plan = self._plan()
+        with unittest.mock.patch(
+            "app.services.llm.generate_script", return_value="texto"
+        ) as mocked:
+            long_video.generate_chapter_script(plan, plan.chapters[0])
+        self.assertEqual(
+            mocked.call_args.kwargs["custom_system_prompt"],
+            long_video.LONG_FORM_SYSTEM_PROMPT,
+        )
+
+    def test_raises_on_empty_script(self):
+        plan = self._plan()
+        with unittest.mock.patch("app.services.llm.generate_script", return_value=""):
+            with self.assertRaises(ValueError):
+                long_video.generate_chapter_script(plan, plan.chapters[0])
+
+    def test_raises_on_provider_error_string(self):
+        plan = self._plan()
+        with unittest.mock.patch(
+            "app.services.llm.generate_script", return_value="Error: quota"
+        ):
+            with self.assertRaises(ValueError):
+                long_video.generate_chapter_script(plan, plan.chapters[0])
+
+
+class TestBuildLongScript(unittest.TestCase):
+    OUTLINE = (
+        '[{"title": "A", "brief": "a", "weight": 0.34},'
+        ' {"title": "B", "brief": "b", "weight": 0.33},'
+        ' {"title": "C", "brief": "c", "weight": 0.33}]'
+    )
+
+    def _build(self, script="Frase um. Frase dois.", minutes=10):
+        params = VideoParams(
+            video_subject="Ariane 5",
+            video_mode="long",
+            target_duration_minutes=minutes,
+        )
+        with unittest.mock.patch(
+            "app.services.llm._generate_response", return_value=self.OUTLINE
+        ), unittest.mock.patch(
+            "app.services.llm.generate_script", side_effect=lambda **k: script
+        ):
+            return long_video.build_long_script(params)
+
+    def test_char_offsets_match_the_joined_script(self):
+        # Este é o invariante de que a legenda por capítulo depende (plano 04 §5.2).
+        plan = self._build()
+        full = plan.full_script
+        for chapter in plan.chapters:
+            with self.subTest(chapter=chapter.index):
+                self.assertEqual(
+                    full[chapter.char_start : chapter.char_end], chapter.script
+                )
+
+    def test_progress_is_reported_and_reaches_one(self):
+        seen = []
+        params = VideoParams(
+            video_subject="Ariane 5", video_mode="long", target_duration_minutes=10
+        )
+        with unittest.mock.patch(
+            "app.services.llm._generate_response", return_value=self.OUTLINE
+        ), unittest.mock.patch(
+            "app.services.llm.generate_script", side_effect=lambda **k: "Texto."
+        ):
+            long_video.build_long_script(params, progress_cb=seen.append)
+        self.assertEqual(seen[0], 0.0)
+        self.assertEqual(seen[-1], 1.0)
+        self.assertEqual(seen, sorted(seen))
+
+    def test_over_budget_plan_drops_whole_chapters(self):
+        # Cada capítulo "narra" muito mais que o alvo, estourando o teto de 35 min.
+        huge = " ".join(["palavra"] * 4000)
+        plan = self._build(script=huge, minutes=34)
+        self.assertLess(plan.chapter_count, 3)
+        self.assertGreaterEqual(plan.chapter_count, 1)
+
+    def test_truncation_never_empties_the_plan(self):
+        huge = " ".join(["palavra"] * 100_000)
+        plan = self._build(script=huge, minutes=34)
+        self.assertGreaterEqual(plan.chapter_count, 1)
+
+
+class TestChapterTerms(unittest.TestCase):
+    def _plan(self):
+        return long_video.LongVideoPlan(
+            subject="Ariane 5",
+            language="pt-BR",
+            target_seconds=600,
+            chapters=[
+                long_video.Chapter(
+                    index=1, title="A", brief="", target_seconds=300, script="texto a"
+                ),
+                long_video.Chapter(
+                    index=2, title="B", brief="", target_seconds=300, script="texto b"
+                ),
+            ],
+        )
+
+    def test_terms_are_requested_in_script_order_mode(self):
+        with unittest.mock.patch(
+            "app.services.llm.generate_terms", return_value=["x"]
+        ) as mocked:
+            long_video.generate_chapter_terms(self._plan())
+        for call in mocked.call_args_list:
+            self.assertTrue(call.kwargs["match_script_order"])
+
+    def test_terms_are_generated_per_chapter(self):
+        with unittest.mock.patch(
+            "app.services.llm.generate_terms", return_value=["x"]
+        ) as mocked:
+            long_video.generate_chapter_terms(self._plan())
+        self.assertEqual(mocked.call_count, 2)
+
+    def test_twelvelabs_rerank_is_never_called(self):
+        # O rerank ordena por relevância temática e destruiria a ordem cronológica
+        # de que a alocação de materiais por capítulo depende.
+        with unittest.mock.patch(
+            "app.services.llm.generate_terms", return_value=["x"]
+        ), unittest.mock.patch(
+            "app.services.twelvelabs.rerank_terms_by_subject"
+        ) as rerank:
+            long_video.generate_chapter_terms(self._plan())
+        rerank.assert_not_called()
+
+    def test_chapter_failure_does_not_abort_the_run(self):
+        with unittest.mock.patch(
+            "app.services.llm.generate_terms",
+            side_effect=[RuntimeError("boom"), ["ok"]],
+        ):
+            plan = long_video.generate_chapter_terms(self._plan())
+        self.assertEqual(plan.chapters[0].terms, ())
+        self.assertEqual(plan.chapters[1].terms, ("ok",))
+
+
+class TestPlanSerialization(unittest.TestCase):
+    def test_plan_to_dict_round_trips_chapter_data(self):
+        plan = long_video.LongVideoPlan(
+            subject="Ariane 5",
+            language="pt-BR",
+            target_seconds=600,
+            chapters=[
+                long_video.Chapter(
+                    index=1,
+                    title="A",
+                    brief="b",
+                    target_seconds=300,
+                    script="texto",
+                    terms=("t1", "t2"),
+                    char_start=0,
+                    char_end=5,
+                )
+            ],
+        )
+        payload = long_video.plan_to_dict(plan)
+        self.assertEqual(payload["subject"], "Ariane 5")
+        self.assertEqual(payload["chapters"][0]["terms"], ["t1", "t2"])
+        self.assertEqual(payload["chapters"][0]["char_end"], 5)
+        # O texto do roteiro não é duplicado aqui: ele já vive em script.json.
+        self.assertNotIn("script", payload["chapters"][0])
 
 
 if __name__ == "__main__":
