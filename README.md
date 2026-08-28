@@ -538,6 +538,19 @@ Trying to load the model directly from the local cache, if it exists.
 
 </details>
 
+## 长视频创作 (Long-form Videos) 🎬
+
+MoneyPrinterTurbo 现在原生支持长视频生成（3 至 35 分钟）：
+- **章节式大纲与文案：** 自动规划章节大纲（Outline），分章节生成连贯文案及精准素材关键词；
+- **分块 TTS 与音轨合并：** 章节独立重试合成，精确计算时间戳偏移合并字幕；
+- **分章节素材匹配：** 按章节下载素材，严格保障全篇画面与文案语义高度贴合；
+- **FFmpeg-first 渲染：** 常量内存占用，原生集成 −14 LUFS 响度标准化及 H.264 High 画质输出。
+
+```bash
+# 命令行示例
+python cli.py --long --duration 10 --video-subject "人类登月全纪实"
+```
+
 ## 反馈建议 📢
 
 - 可以提交 [issue](https://github.com/harry0703/MoneyPrinterTurbo/issues) 或者 [pull request](https://github.com/harry0703/MoneyPrinterTurbo/pulls)。

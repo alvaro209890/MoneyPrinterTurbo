@@ -544,6 +544,19 @@ Solution: [See how to download the model manually from Hugging Face](#subtitle-g
 
 </details>
 
+## Long-form Video Generation 🎬
+
+MoneyPrinterTurbo now natively supports long-form video creation (3 to 35 minutes):
+- **Chapter-based Outline & Scripting:** Hierarchical story planning with coherent chapter generation;
+- **Chunked TTS & Offset-corrected Subtitles:** Independent chapter synthesis retries with drift-free SRT merging;
+- **Per-chapter Stock Allocation:** Contextual keyword mapping ensures visual cohesion throughout the video;
+- **FFmpeg-first Rendering:** Constant memory footprint, integrated −14 LUFS loudness normalization, and H.264 High Profile output.
+
+```bash
+# CLI Example
+python cli.py --long --duration 10 --video-subject "The Apollo Moon Landing"
+```
+
 ## Feedback & Suggestions 📢
 
 - You can submit an [issue](https://github.com/harry0703/MoneyPrinterTurbo/issues) or a [pull request](https://github.com/harry0703/MoneyPrinterTurbo/pulls).
