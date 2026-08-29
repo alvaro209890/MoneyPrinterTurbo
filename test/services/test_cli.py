@@ -32,6 +32,22 @@ class TestCli(unittest.TestCase):
 
         self.assertEqual(params.voice_name, "zh-CN-XiaoxiaoNeural-Female")
 
+    def test_semantic_matching_defaults_enabled_and_can_be_toggled(self):
+        default_params = cli.build_video_params(
+            cli.parse_args(["--video-subject", "test"])
+        )
+        self.assertTrue(default_params.enable_semantic_matching)
+
+        enabled_params = cli.build_video_params(
+            cli.parse_args(["--video-subject", "test", "--semantic-matching"])
+        )
+        self.assertTrue(enabled_params.enable_semantic_matching)
+
+        disabled_params = cli.build_video_params(
+            cli.parse_args(["--video-subject", "test", "--no-semantic-matching"])
+        )
+        self.assertFalse(disabled_params.enable_semantic_matching)
+
     def test_complete_script_can_replace_video_subject(self):
         args = cli.parse_args(["--video-script", "完整的视频文案"])
         params = cli.build_video_params(args)

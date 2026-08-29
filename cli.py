@@ -397,6 +397,17 @@ Batch manifests:
         ),
     )
     video_group.add_argument(
+        "--semantic-matching",
+        dest="enable_semantic_matching",
+        default=None,
+        action=argparse.BooleanOptionalAction,
+        help=(
+            "align stock clips to narration scenes and narrative beats "
+            "(default: enabled). Use --no-semantic-matching to fall back "
+            "to the legacy clip pipeline"
+        ),
+    )
+    video_group.add_argument(
         "--n-threads",
         type=_positive_int,
         default=None,
@@ -846,6 +857,7 @@ def build_video_params(args: argparse.Namespace) -> VideoParams:
         "video_transition_mode",
         "video_clip_duration",
         "match_materials_to_script",
+        "enable_semantic_matching",
         "n_threads",
         "voice_volume",
         "voice_rate",

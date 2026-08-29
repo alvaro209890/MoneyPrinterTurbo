@@ -136,6 +136,16 @@ def run():
         "--task-id",
         help="ID explícito para a tarefa (UUID)",
     )
+    parser.add_argument(
+        "--semantic-matching",
+        dest="semantic_matching",
+        default=True,
+        action=argparse.BooleanOptionalAction,
+        help=(
+            "Alinhamento semântico de cenas e beats narrativos "
+            "(padrão: ligado). Use --no-semantic-matching para o pipeline legado."
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -202,6 +212,10 @@ def run():
         cmd.append("--no-subtitle-enabled")
     if args.task_id:
         cmd.extend(["--task-id", args.task_id])
+    if args.semantic_matching:
+        cmd.append("--semantic-matching")
+    else:
+        cmd.append("--no-semantic-matching")
 
     env = os.environ.copy()
     env["PYTHONPATH"] = str(MPT_DIR)
